@@ -27,6 +27,10 @@ impl BoolToIntMap {
 		debug_assert_eq!(x, None, "lazy literal already exists");
 	}
 
+	/// Returns the integer variable identifier and the meaning of the literal:
+	/// if the `var` is associated with an eager encoded integer variable, the returned meaning is `None`.
+	/// if the `var` is associated with a lazy encoded integer variable and `var` exists in the storage, the returned meaning is `Some(meaning)`.
+	/// otherwise, the returned value is `None`.
 	pub(crate) fn get(&self, var: RawVar) -> Option<(IntVarRef, Option<LitMeaning>)> {
 		let is_eager = self
 			.eager

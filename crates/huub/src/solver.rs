@@ -539,6 +539,7 @@ where
 	delegate! {
 		to self.engine().state {
 			fn try_int_lit(&self, var: IntView, meaning: LitMeaning) -> Option<BoolView>;
+			fn lit_to_int(&self, lit: RawLit) -> Option<(IntVarRef, LitMeaning)>;
 		}
 		to self.engine_mut().state {
 			fn get_int_lower_bound_lit(&mut self, var: IntView) -> BoolView;

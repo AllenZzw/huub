@@ -178,6 +178,7 @@ impl DecisionActions for SolvingContext<'_> {
 impl ExplanationActions for SolvingContext<'_> {
 	delegate! {
 		to self.state {
+			fn lit_to_int(&self, lit: RawLit) -> Option<(IntVarRef, LitMeaning)>;
 			fn try_int_lit(&self, var: IntView, meaning: LitMeaning) -> Option<BoolView>;
 			fn get_int_lit_relaxed(&mut self, var: IntView, meaning: LitMeaning) -> (BoolView, LitMeaning);
 			fn get_int_lower_bound_lit(&mut self, var: IntView) -> BoolView;

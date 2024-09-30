@@ -417,11 +417,8 @@ impl SearchStatistics {
 
 impl State {
 	fn determine_int_event(&mut self, lit: RawLit) -> Option<(IntVarRef, IntEvent)> {
-		if let Some((iv, meaning)) = self.bool_to_int.get(lit.var()) {
+		if let Some((iv, meaning)) = self.lit_to_int(lit) {
 			let (lb, ub) = self.int_vars[iv].get_bounds(self);
-			let meaning = meaning
-				.map(|l| if lit.is_negated() { !l } else { l })
-				.unwrap_or_else(|| self.int_vars[iv].lit_meaning(lit));
 			// Enact domain changes and determine change event
 			let event: IntEvent = match meaning {
 				LitMeaning::Eq(i) => {
@@ -668,6 +665,8 @@ impl ExplanationActions for State {
 		}
 	}
 
+	/// Get the relaxed boolean view representing the actual meaning
+	/// and back to the strongest in the original view if it was linearly transformed
 	fn get_int_lit_relaxed(&mut self, var: IntView, meaning: LitMeaning) -> (BoolView, LitMeaning) {
 		debug_assert!(
 			matches!(meaning, LitMeaning::GreaterEq(_) | LitMeaning::Less(_)),
@@ -684,7 +683,6 @@ impl ExplanationActions for State {
 			_ => meaning,
 		};
 
-		// Get the (relaxed) boolean view representing the meaning and the actual (relaxed) meaning
 		let (bv, meaning) = match var.0 {
 			IntViewInner::VarRef(iv) | IntViewInner::Linear { var: iv, .. } => {
 				let var = &mut self.int_vars[iv];
@@ -725,11 +723,10 @@ impl ExplanationActions for State {
 			}
 		};
 
-		// Transform the meaning back to fit the original view if it was linearly transformed
 		let meaning = if let IntViewInner::Linear { transformer, .. }
 		| IntViewInner::Bool { transformer, .. } = var.0
 		{
-			transformer.transform_lit(meaning)
+			!transformer.transform_lit(!meaning)
 		} else {
 			meaning
 		};
@@ -782,6 +779,19 @@ impl ExplanationActions for State {
 					_ => BoolViewInner::Const(true),
 				},
 			),
+		}
+	}
+
+	/// Convert a literal `lit` to its associated integer variable and the corresponding literal meaning.
+	/// Returns `None` if the literal does not exists in the mapping.  
+	fn lit_to_int(&self, lit: RawLit) -> Option<(IntVarRef, LitMeaning)> {
+		if let Some((iv, meaning)) = self.bool_to_int.get(lit.var()) {
+			let meaning = meaning
+				.map(|l| if lit.is_negated() { !l } else { l })
+				.unwrap_or_else(|| self.int_vars[iv].lit_meaning(lit));
+			Some((iv, meaning))
+		} else {
+			None
 		}
 	}
 }

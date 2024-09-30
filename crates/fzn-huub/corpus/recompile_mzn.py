@@ -55,6 +55,15 @@ INSTANCES = [
             "svrp_s4_v2_c3.fzn.json": "https://raw.githubusercontent.com/MiniZinc/mzn-challenge/refs/heads/develop/2019/stochastic-vrp/vrp-s4-v2-c3_svrp-v2-c3_det.mzn"
         },
     },
+    {  # Multi-dimensional knapsack 
+        # Note that the model only consider the first 30 items of the instance for testing 
+        "model": "mknapsack.mzn",
+        "instances": {
+            "mknap1_6.fzn.json": "https://raw.githubusercontent.com/MiniZinc/minizinc-benchmarks/refs/heads/master/multi-knapsack/mknap1-6.dzn",
+            "mknap2_1.fzn.json": "https://raw.githubusercontent.com/MiniZinc/minizinc-benchmarks/refs/heads/master/multi-knapsack/mknap2-1.dzn",
+            "mknap2_20.fzn.json": "https://raw.githubusercontent.com/MiniZinc/minizinc-benchmarks/refs/heads/master/multi-knapsack/mknap2-20.dzn",
+        },
+    },
     {  # Miscellaneous: instances constructed to test different parts of the solver
         "model": None,
         "instances": {

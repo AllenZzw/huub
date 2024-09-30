@@ -11,7 +11,7 @@ use crate::{
 		value::IntVal,
 		view::{BoolViewInner, IntView, IntViewInner},
 	},
-	BoolView, Conjunction, ReformulationError,
+	BoolView, Conjunction, LitMeaning, NonZeroIntVal, ReformulationError,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,23 +126,64 @@ where
 		Ok(())
 	}
 
+	/// Generalized explanation for the linear inequality for propagating x[i] ≤ v when abs(w[i]) > 1
+	/// 
+	/// The propagation rule if w[i] * x[i] ≤ rhs - sum_{j != i} w[j] * x[j].lower_bound. 
+	/// It can be executed when rhs - sum_{j != i} w[j] * x[j].lower_bound < w[i] * (x[i].upper_bound + 1), 
+	/// which means rhs - w[i] * (x[i].upper_bound + 1) < sum_{j != i} w[j] * x[j].lower_bound. 
 	fn explain(&mut self, actions: &mut E, _: Option<RawLit>, data: u64) -> Conjunction {
 		let i = data as usize;
-		let mut var_lits: Vec<RawLit> = self
-			.vars
-			.iter()
-			.enumerate()
-			.filter_map(|(j, v)| {
-				if j == i {
-					return None;
+		// check whether the variable upper bound can be further generalized
+		let mut slack = match self.vars[i].0 {
+			IntViewInner::Linear { transformer, .. } | IntViewInner::Bool { transformer, .. }
+				if transformer.scale != NonZeroIntVal::new(1).unwrap() =>
+			{
+				let lb_sum = self
+							.vars
+							.iter()
+							.enumerate()
+							.filter(|(j, _)| *j != i)
+							.map(|(_, v)| actions.get_int_lower_bound(*v))
+							.sum::<IntVal>();
+				let propagated_ub = self.max - lb_sum; 
+				// get the weakest upper bound that can be propagated
+				match transformer.relaxed_lit(LitMeaning::Less(propagated_ub + 1)) {
+					LitMeaning::Less(shifted_relaxed_ub) => shifted_relaxed_ub - 1 - propagated_ub,
+					_ => unreachable!(
+						"relaxed_lit should always return LitMeaning::Less with the input LitMeaning::Less"
+					),
 				}
+			}
+			_ => 0,
+		};
+
+		debug_assert!(slack >= 0);
+		let mut var_lits = Vec::new();
+		for (_, v) in self.vars.iter().enumerate().filter(|(j, _)| *j != i) {
+			if slack == 0 {
+				// no generalization if slack is 0
 				if let BoolView(BoolViewInner::Lit(lit)) = actions.get_int_lower_bound_lit(*v) {
-					Some(lit)
-				} else {
-					None
+					var_lits.push(lit);
 				}
-			})
-			.collect();
+			} else {
+				// generalize explanations for linear propagator
+				let lb = actions.get_int_lower_bound(*v);
+
+				// get the relaxed literal `lit` and the strongest lower bound that is represented by `lit`
+				match actions.get_int_lit_relaxed(*v, LitMeaning::GreaterEq(lb - slack)) {
+					(BoolView(BoolViewInner::Lit(lit)), LitMeaning::GreaterEq(strongest_lb)) => {
+						var_lits.push(lit);
+						slack -= lb - strongest_lb;
+					}
+					(BoolView(BoolViewInner::Const(true)), LitMeaning::GreaterEq(strongest_lb)) => {
+						slack -= lb - strongest_lb;
+					}
+					_ => unreachable!(
+						"get relaxed lower bound literal must be either constant true or a literal"
+					),
+				}
+			}
+		}
 		if let Some(r) = self.reification.get() {
 			var_lits.push(*r);
 		}
