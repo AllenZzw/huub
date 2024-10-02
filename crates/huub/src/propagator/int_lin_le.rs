@@ -19,6 +19,7 @@ pub(crate) struct IntLinearLessEqBoundsImpl<const R: usize> {
 	vars: Vec<IntView>,               // Variables in the linear inequality
 	max: IntVal,                      // Lower bound of the linear inequality
 	reification: OptField<R, RawLit>, // Reified variable
+	generalized_expl: bool,           // Whether to use generalized explanation
 }
 
 pub(crate) type IntLinearLessEqBounds = IntLinearLessEqBoundsImpl<0>;
@@ -127,25 +128,25 @@ where
 	}
 
 	/// Generalized explanation for the linear inequality for propagating x[i] ≤ v when abs(w[i]) > 1
-	/// 
-	/// The propagation rule if w[i] * x[i] ≤ rhs - sum_{j != i} w[j] * x[j].lower_bound. 
-	/// It can be executed when rhs - sum_{j != i} w[j] * x[j].lower_bound < w[i] * (x[i].upper_bound + 1), 
-	/// which means rhs - w[i] * (x[i].upper_bound + 1) < sum_{j != i} w[j] * x[j].lower_bound. 
+	///
+	/// The propagation rule if w[i] * x[i] ≤ rhs - sum_{j != i} w[j] * x[j].lower_bound.
+	/// It can be executed when rhs - sum_{j != i} w[j] * x[j].lower_bound < w[i] * (x[i].upper_bound + 1),
+	/// which means rhs - w[i] * (x[i].upper_bound + 1) < sum_{j != i} w[j] * x[j].lower_bound.
 	fn explain(&mut self, actions: &mut E, _: Option<RawLit>, data: u64) -> Conjunction {
 		let i = data as usize;
 		// check whether the variable upper bound can be further generalized
 		let mut slack = match self.vars[i].0 {
 			IntViewInner::Linear { transformer, .. } | IntViewInner::Bool { transformer, .. }
-				if transformer.scale != NonZeroIntVal::new(1).unwrap() =>
+				if self.generalized_expl && transformer.scale != NonZeroIntVal::new(1).unwrap() =>
 			{
 				let lb_sum = self
-							.vars
-							.iter()
-							.enumerate()
-							.filter(|(j, _)| *j != i)
-							.map(|(_, v)| actions.get_int_lower_bound(*v))
-							.sum::<IntVal>();
-				let propagated_ub = self.max - lb_sum; 
+					.vars
+					.iter()
+					.enumerate()
+					.filter(|(j, _)| *j != i)
+					.map(|(_, v)| actions.get_int_lower_bound(*v))
+					.sum::<IntVal>();
+				let propagated_ub = self.max - lb_sum;
 				// get the weakest upper bound that can be propagated
 				match transformer.relaxed_lit(LitMeaning::Less(propagated_ub + 1)) {
 					LitMeaning::Less(shifted_relaxed_ub) => shifted_relaxed_ub - 1 - propagated_ub,
@@ -205,6 +206,7 @@ impl<const R: usize> Poster for IntLinearLessEqBoundsPoster<R> {
 			vars: self.vars,
 			max: self.max,
 			reification: self.reification,
+			generalized_expl: actions.get_generalized_linear_explanation(),
 		};
 		for &v in prop.vars.iter() {
 			actions.enqueue_on_int_change(v, IntPropCond::UpperBound);

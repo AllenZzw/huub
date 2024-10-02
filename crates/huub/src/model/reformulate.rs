@@ -28,6 +28,8 @@ pub struct InitConfig {
 	restart: bool,
 	/// Whether to enable the vivification in the oracle solver.
 	vivification: bool,
+	/// Whether to use the generalized explanation for linear inequality propagator.
+	generalized_linear_explanation: bool,
 }
 
 #[derive(Error, Debug, PartialEq, Eq)]
@@ -72,6 +74,10 @@ impl InitConfig {
 		self.vivification
 	}
 
+	pub fn generalized_linear_explanation(&self) -> bool {
+		self.generalized_linear_explanation
+	}
+
 	/// Change the maximum cardinality of the domain of an integer variable before
 	/// its order encoding is created lazily.
 	pub fn with_int_eager_limit(mut self, limit: usize) -> Self {
@@ -88,6 +94,15 @@ impl InitConfig {
 	/// Change whether to enable the vivification in the oracle solver.
 	pub fn with_vivification(mut self, vivification: bool) -> Self {
 		self.vivification = vivification;
+		self
+	}
+
+	/// Change whether to use the generalized explanation for linear inequality propagator.
+	pub fn with_generalized_linear_explanation(
+		mut self,
+		generalized_linear_explanation: bool,
+	) -> Self {
+		self.generalized_linear_explanation = generalized_linear_explanation;
 		self
 	}
 }

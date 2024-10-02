@@ -16,4 +16,6 @@ pub(crate) trait InitializationActions: DecisionActions {
 	/// Enqueue a propagator to be enqueued when an integer variable is changed
 	/// according to the given propagation condition.
 	fn enqueue_on_int_change(&mut self, var: IntView, condition: IntPropCond);
+	/// Whether to use the generalized explanation for linear inequality propagator.
+	fn get_generalized_linear_explanation(&self) -> bool;
 }

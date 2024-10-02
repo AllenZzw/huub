@@ -94,6 +94,7 @@ impl Model {
 			self.enqueued[con] = false;
 		}
 
+		slv.set_generalized_linear_explanation(config.generalized_linear_explanation());
 		// TODO: Detect Views From Model
 
 		// Determine encoding types for integer variables

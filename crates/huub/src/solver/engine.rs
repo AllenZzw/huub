@@ -621,6 +621,10 @@ impl State {
 		self.config.vsids_only = enable;
 		self.vsids = enable;
 	}
+
+	pub(crate) fn set_generalized_linear_explanation(&mut self, enable: bool) {
+		self.config.generalized_linear_explanation  = enable;
+	}
 }
 
 impl ExplanationActions for State {

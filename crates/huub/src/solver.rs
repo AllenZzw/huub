@@ -51,6 +51,8 @@ pub(crate) struct SolverConfiguration {
 	vsids_after: Option<u32>,
 	/// Only use the activity-based search heuristic provided by the SAT solver. Ignore the user-specific search heuristic.
 	vsids_only: bool,
+	/// Options for propagator configurations
+	generalized_linear_explanation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -374,6 +376,7 @@ where
 			pub fn set_vsids_after(&mut self, conflicts: Option<u32>);
 			pub fn set_vsids_only(&mut self, enable: bool);
 			pub fn set_toggle_vsids(&mut self, enable: bool);
+			pub fn set_generalized_linear_explanation(&mut self, enable: bool);
 		}
 	}
 

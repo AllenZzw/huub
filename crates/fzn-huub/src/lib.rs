@@ -77,6 +77,8 @@ pub struct Cli<Stdout, Stderr> {
 	vsids_after: Option<u32>,
 	/// Only use the SAT VSIDS heuristic for search
 	vsids_only: bool,
+	/// Whether the generalized explanations for linear inequality propagator is enabled
+	generalized_linear_explanation: bool,
 
 	// --- Output configuration ---
 	/// Output stream for (intermediate) solutions and statistics
@@ -129,7 +131,8 @@ where
 		}
 		config = config
 			.with_restart(self.free_search || self.restart)
-			.with_vivification(self.vivification);
+			.with_vivification(self.vivification)
+			.with_generalized_linear_explanation(self.generalized_linear_explanation);
 		config
 	}
 
@@ -448,6 +451,7 @@ where
 			toggle_vsids: self.toggle_vsids,
 			vivification: self.vivification,
 			vsids_after: self.vsids_after,
+			generalized_linear_explanation: self.generalized_linear_explanation,
 			vsids_only: self.vsids_only,
 			stdout: self.stdout,
 		}
@@ -469,6 +473,7 @@ where
 			toggle_vsids: self.toggle_vsids,
 			vivification: self.vivification,
 			vsids_after: self.vsids_after,
+			generalized_linear_explanation: self.generalized_linear_explanation,
 			vsids_only: self.vsids_only,
 			stderr: self.stderr,
 			ansi_color: self.ansi_color,
@@ -519,6 +524,8 @@ impl TryFrom<Arguments> for Cli<io::Stdout, fn() -> io::Stderr> {
 			vsids_after: args
 				.opt_value_from_str("--vsids-after")
 				.map_err(|e| e.to_string())?,
+
+			generalized_linear_explanation: args.contains("--generalized-linear-expl"),
 
 			verbose,
 			path: args

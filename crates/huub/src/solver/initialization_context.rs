@@ -95,6 +95,14 @@ where
 			(InitRef::Brancher, _) => {} // ignore: branchers don't receive notifications, and contained literals are already observed.
 		}
 	}
+
+	fn get_generalized_linear_explanation(&self) -> bool {
+		self.slv
+			.engine()
+			.state
+			.config
+			.generalized_linear_explanation
+	}
 }
 
 impl<'a, Sol, Sat> TrailingActions for InitializationContext<'a, Sat>
