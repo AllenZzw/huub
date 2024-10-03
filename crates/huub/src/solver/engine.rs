@@ -55,7 +55,7 @@ macro_rules! trace_new_lit {
 			},
 			"register new literal"
 		);
-		tracing::trace!(lit = i32::from($lit), "lazy literal")
+		tracing::trace!(rawvar_no = i32::from($lit), lit = i32::from($lit), "lazy literal")
 	};
 }
 pub(crate) use trace_new_lit;
@@ -140,7 +140,7 @@ pub(crate) struct State {
 
 impl IpasirPropagator for Engine {
 	fn notify_assignment(&mut self, lit: RawLit, persistent: bool) {
-		trace!(lit = i32::from(lit), persistent, "assignment");
+		trace!(rawvar_no = i32::from(lit), lit = i32::from(lit), persistent, "assignment");
 		// Process Boolean assignment
 		if persistent && self.state.decision_level() != 0 {
 			// Note that the assignment might already be known and trailed, but not previously marked as persistent
@@ -422,6 +422,7 @@ impl State {
 			let meaning = meaning
 				.map(|l| if lit.is_negated() { !l } else { l })
 				.unwrap_or_else(|| self.int_vars[iv].lit_meaning(lit));
+			trace!(rawvar_no = i32::from(lit), lit = i32::from(lit), int_var = usize::from(iv), meaning = ?meaning, lb, ub, "determine int event");
 			// Enact domain changes and determine change event
 			let event: IntEvent = match meaning {
 				LitMeaning::Eq(i) => {
@@ -430,6 +431,7 @@ impl State {
 					}
 					let prev_lb = self.int_vars[iv].notify_lower_bound(&mut self.trail, i);
 					let prev_ub = self.int_vars[iv].notify_upper_bound(&mut self.trail, i);
+					debug_assert!(lb <= i && i <= ub);
 					debug_assert!(prev_lb < i || prev_ub > i);
 					debug_assert_eq!(self.get_int_val(IntView(IntViewInner::VarRef(iv))), Some(i));
 					IntEvent::Fixed
@@ -445,6 +447,7 @@ impl State {
 						return None;
 					}
 					let prev = self.int_vars[iv].notify_lower_bound(&mut self.trail, new_lb);
+					debug_assert!(new_lb <= ub); 
 					debug_assert!(prev < new_lb);
 					if new_lb == ub {
 						IntEvent::Fixed
@@ -458,6 +461,7 @@ impl State {
 						return None;
 					}
 					let prev = self.int_vars[iv].notify_upper_bound(&mut self.trail, new_ub);
+					debug_assert!(new_ub >= lb); 
 					debug_assert!(new_ub < prev);
 					if new_ub == lb {
 						IntEvent::Fixed

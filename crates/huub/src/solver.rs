@@ -517,7 +517,9 @@ where
 				def.next.map(Into::into),
 			) {
 				trace!(clause = ?cl.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add clause");
-				self.oracle.add_clause(cl).unwrap();
+				trace!(cl =? cl, "raw clause");
+				let res = self.oracle.add_clause(cl);
+				trace!(res =? res, "result");
 			}
 			v
 		};

@@ -18,7 +18,7 @@ use pindakaas::{
 };
 use rangelist::{IntervalIterator, RangeList};
 use thiserror::Error;
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::{
 	model::{
@@ -1524,6 +1524,7 @@ where
 		S: Clone + Debug + Deref<Target = str> + Display + Eq + Hash + Ord,
 	{
 		let (mut prb, map, fzn_stats) = Model::from_fzn(fzn)?;
+		trace!(map =? map, "map");
 		let (mut slv, remap) = prb.to_solver(config)?;
 		let map = map
 			.into_iter()
