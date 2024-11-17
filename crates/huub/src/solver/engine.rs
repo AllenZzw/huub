@@ -301,7 +301,7 @@ impl PropagatorExtension for Engine {
 		// Create a propagation context
 		let mut ctx = SolvingContext::new(slv, &mut self.state);
 
-		// Calculate values of each integer and notify popgators
+		// Calculate values of each integer and notify popagators
 		for r in (0..ctx.state.int_vars.len()).map(IntVarRef::new) {
 			let (lb, ub) = ctx.state.int_vars[r].get_bounds(&ctx.state.trail);
 			if lb != ub {
@@ -486,6 +486,7 @@ impl State {
 		let new_level = self.decision_level();
 		if new_level > self.statistics.peak_depth {
 			self.statistics.peak_depth = new_level;
+			debug!(level = new_level, "new peak decision level");
 		}
 	}
 
