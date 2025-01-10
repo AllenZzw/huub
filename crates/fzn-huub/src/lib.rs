@@ -110,6 +110,8 @@ pub struct Cli<Stdout, Stderr> {
 	stderr: Stderr,
 	/// Whether to use ANSI color codes in the output (only for stderr)
 	ansi_color: bool,
+	/// Interval in milliseconds to trace propagator activities
+	trace_interval: Option<u32>,
 }
 
 /// Solution struct to display the results of the solver
@@ -280,6 +282,8 @@ where
 			slv.set_toggle_vsids(self.toggle_vsids);
 			slv.set_vsids_after(self.vsids_after);
 		}
+
+		slv.set_trace_interval(self.trace_interval);
 
 		// Determine Goal and Objective
 		let start_solve = Instant::now();
@@ -528,6 +532,7 @@ where
 			vsids_after: self.vsids_after,
 			vsids_only: self.vsids_only,
 			stdout: self.stdout,
+			trace_interval: self.trace_interval,
 		}
 	}
 
@@ -552,6 +557,7 @@ where
 			vsids_only: self.vsids_only,
 			stderr: self.stderr,
 			ansi_color: self.ansi_color,
+			trace_interval: self.trace_interval,
 		}
 	}
 }
@@ -600,6 +606,9 @@ impl TryFrom<Arguments> for Cli<io::Stdout, fn() -> io::Stderr> {
 			vsids_only: args.contains("--vsids-only"),
 			vsids_after: args
 				.opt_value_from_str("--vsids-after")
+				.map_err(|e| e.to_string())?,
+			trace_interval: args
+				.opt_value_from_str("--trace-interval")
 				.map_err(|e| e.to_string())?,
 
 			verbose,
