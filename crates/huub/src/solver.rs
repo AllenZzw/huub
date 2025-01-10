@@ -94,6 +94,8 @@ pub(crate) struct SolverConfiguration {
 	vsids_after: Option<u32>,
 	/// Only use the activity-based search heuristic provided by the SAT solver. Ignore the user-specific search heuristic.
 	vsids_only: bool,
+	/// Interval in milliseconds to trace propagator activities.
+	trace_interval: Option<u32>,
 }
 
 fn trace_learned_clause(clause: &mut dyn Iterator<Item = RawLit>) {
@@ -522,9 +524,11 @@ impl<Oracle: PropagatingSolver<Engine>> Solver<Oracle> {
 			/// Set the number of conflicts after which the solver should switch to using
 			/// VSIDS to make search decisions.
 			pub fn set_vsids_after(&mut self, conflicts: Option<u32>);
-			/// Set wether the solver should make all search decisions based on the VSIDS
+			/// Set whether the solver should make all search decisions based on the VSIDS
 			/// only.
 			pub fn set_vsids_only(&mut self, enable: bool);
+			/// Set the interval in milliseconds to output propagator tracing information
+			pub fn set_trace_interval(&mut self, trace_interval: Option<u32>);
 		}
 	}
 }

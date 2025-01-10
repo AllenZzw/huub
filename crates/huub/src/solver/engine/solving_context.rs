@@ -131,9 +131,18 @@ impl<'a> SolvingContext<'a> {
 	/// Run the propagators in the queue until a propagator detects a conflict,
 	/// returns literals to be propagated by the SAT oracle, or the queue is empty.
 	pub(crate) fn run_propagators(&mut self, propagators: &mut IndexVec<PropRef, BoxedPropagator>) {
+		// Update tracing statistics on new decision level
+		if let Some(interval) = self.state.config.trace_interval {
+			if self.state.tracing_statistics.reach_next_slot(interval) {
+				self.state.tracing_statistics.output(interval);
+				self.state.tracing_statistics.reset(interval);
+			}
+		}
+
 		while let Some(p) = self.state.propagator_queue.pop() {
 			debug_assert!(!self.state.failed);
 			debug_assert!(self.state.conflict.is_none());
+			let propagation_before = self.state.propagation_queue.len();
 			self.state.enqueued[p] = false;
 			self.current_prop = p;
 			let prop = propagators[p].as_mut();
@@ -147,6 +156,11 @@ impl<'a> SolvingContext<'a> {
 				debug_assert!(self.state.conflict.is_none());
 				self.state.failed = true;
 				self.state.conflict = Some(clause);
+				self.state.tracing_statistics.conflicts += 1;
+			} else if propagation_before != self.state.propagation_queue.len() {
+				self.state.tracing_statistics.propagations += 1;
+			} else {
+				self.state.tracing_statistics.no_propagations += 1;
 			}
 			if self.state.conflict.is_some() || !self.state.propagation_queue.is_empty() {
 				return;

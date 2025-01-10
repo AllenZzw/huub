@@ -28,6 +28,7 @@ pub(crate) mod trail;
 use std::{
 	collections::{HashMap, VecDeque},
 	mem,
+	time::Instant,
 };
 
 use delegate::delegate;
@@ -39,7 +40,7 @@ use pindakaas::{
 	Lit as RawLit, Var as RawVar,
 };
 pub(crate) use trace_new_lit;
-use tracing::{debug, trace};
+use tracing::{debug, info, trace};
 
 use crate::{
 	actions::{DecisionActions, ExplanationActions, InspectionActions, TrailingActions},
@@ -88,6 +89,63 @@ pub struct SearchStatistics {
 	user_decisions: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TraceStatistics {
+	/// Timer
+	pub(crate) timer: Instant,
+	/// Counter of propagator explanations in the last interval
+	pub(crate) explanations: usize,
+	/// Counter of propagator propagations in the last interval
+	pub(crate) propagations: usize,
+	/// Counter of detected propagations in the last interval
+	pub(crate) conflicts: usize,
+	/// Counter of ineffective propagation calls in the last interval
+	pub(crate) no_propagations: usize,
+	/// Last time slot for propagator tracing
+	pub(crate) time_slot: u32,
+}
+
+impl Default for TraceStatistics {
+	fn default() -> Self {
+		Self {
+			timer: Instant::now(),
+			explanations: Default::default(),
+			propagations: Default::default(),
+			conflicts: Default::default(),
+			no_propagations: Default::default(),
+			time_slot: Default::default(),
+		}
+	}
+}
+
+impl TraceStatistics {
+	pub(crate) fn reset(&mut self, interval: u32) {
+		self.time_slot = self.timer.elapsed().as_millis() as u32 / interval;
+		self.conflicts = 0;
+		self.propagations = 0;
+		self.no_propagations = 0;
+		self.explanations = 0;
+	}
+
+	#[inline]
+	pub(crate) fn reach_next_slot(&self, interval: u32) -> bool {
+		self.timer.elapsed().as_millis() / interval as u128 - self.time_slot as u128 > 0
+	}
+
+	#[inline]
+	pub(crate) fn output(&self, interval: u32) {
+		info!(
+			"time={time} propagation results conflicts={conflicts}, propagations={propagations}, no_propagations={no_propagations}, explanations={explanations}, trace_interval={interval}", 
+			time= self.time_slot,
+			conflicts = self.conflicts,
+			propagations = self.propagations,
+			no_propagations = self.no_propagations,
+			explanations = self.explanations,
+			interval = interval,
+		);
+	}
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct State {
 	/// Solver confifguration
@@ -120,6 +178,8 @@ pub(crate) struct State {
 	pub(crate) clauses: VecDeque<Clause>,
 	/// Solving statistics
 	pub(crate) statistics: SearchStatistics,
+	/// Propagator tracing statistics
+	pub(crate) tracing_statistics: TraceStatistics,
 	/// Whether VSIDS is currently enabled
 	pub(crate) vsids: bool,
 
@@ -168,6 +228,8 @@ impl PropagatorExtension for Engine {
 		} else {
 			vec![propagated_lit]
 		};
+
+		self.state.tracing_statistics.explanations += 1;
 
 		debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add reason clause");
 		clause
@@ -617,6 +679,11 @@ impl State {
 	pub(crate) fn set_vsids_only(&mut self, enable: bool) {
 		self.config.vsids_only = enable;
 		self.vsids = enable;
+	}
+
+	/// Set the interval in milliseconds to output propagator tracing information
+	pub(crate) fn set_trace_interval(&mut self, interval: Option<u32>) {
+		self.config.trace_interval = interval;
 	}
 }
 
