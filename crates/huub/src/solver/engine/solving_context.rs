@@ -4,7 +4,10 @@
 
 use delegate::delegate;
 use index_vec::IndexVec;
-use pindakaas::{solver::propagation::SolvingActions, Lit as RawLit};
+use pindakaas::{
+	solver::propagation::{ClausePersistence, SolvingActions},
+	Lit as RawLit,
+};
 use tracing::trace;
 
 use crate::{
@@ -186,7 +189,9 @@ impl DecisionActions for SolvingContext<'_> {
 				def.prev.map(Into::into),
 				def.next.map(Into::into),
 			) {
-				self.state.clauses.push_back(cl);
+				self.state
+					.clauses
+					.push_back((cl, ClausePersistence::Irreduntant));
 			}
 			v
 		};

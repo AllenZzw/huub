@@ -96,6 +96,8 @@ pub(crate) struct SolverConfiguration {
 	vsids_only: bool,
 	/// Interval in milliseconds to trace propagator activities.
 	trace_interval: Option<u32>,
+	/// Whether the engine forward explanation cluase eagerly
+	forward_explanation: bool,
 }
 
 fn trace_learned_clause(clause: &mut dyn Iterator<Item = RawLit>) {
@@ -527,6 +529,9 @@ impl<Oracle: PropagatingSolver<Engine>> Solver<Oracle> {
 			/// Set whether the solver should make all search decisions based on the VSIDS
 			/// only.
 			pub fn set_vsids_only(&mut self, enable: bool);
+			/// Set whether the solver should eagerly forward explanation cluases to the 
+			/// SAT engine.
+			pub fn set_forward_explanation(&mut self, enable: bool);
 			/// Set the interval in milliseconds to output propagator tracing information
 			pub fn set_trace_interval(&mut self, trace_interval: Option<u32>);
 		}

@@ -175,7 +175,7 @@ pub(crate) struct State {
 
 	// ---- Non-Trailed Infrastructure ----
 	/// Storage for clauses to be communicated to the solver
-	pub(crate) clauses: VecDeque<Clause>,
+	pub(crate) clauses: VecDeque<(Clause, ClausePersistence)>,
 	/// Solving statistics
 	pub(crate) statistics: SearchStatistics,
 	/// Propagator tracing statistics
@@ -202,9 +202,12 @@ impl PropagatorExtension for Engine {
 		_slv: &mut dyn SolvingActions,
 	) -> Option<(Clause, ClausePersistence)> {
 		if !self.state.clauses.is_empty() {
-			let clause = self.state.clauses.pop_front(); // Known to be `Some`
-			trace!(clause = ?clause.as_ref().unwrap().iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add external clause");
-			clause.map(|c| (c, ClausePersistence::Irreduntant))
+			if let Some((c, persistent)) = self.state.clauses.pop_front() {
+				trace!(clause = ? c.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add external clause");
+				Some((c, persistent))
+			} else {
+				None
+			}
 		} else if !self.state.propagation_queue.is_empty() {
 			None // Require that the solver first applies the remaining propagation
 		} else if let Some(conflict) = self.state.conflict.take() {
@@ -218,9 +221,16 @@ impl PropagatorExtension for Engine {
 	fn add_reason_clause(&mut self, propagated_lit: RawLit) -> Clause {
 		// Find reason
 		let reason = self.state.reason_map.remove(&propagated_lit);
+		let mut lazy_reason = false;
+		debug_assert!(
+			!self.state.config.forward_explanation
+				|| matches!(reason, Some(Reason::Lazy(_, _)))
+				|| matches!(reason, None)
+		);
 		// Restore the current state to the state when the propagation happened if explaining lazily
 		if matches!(reason, Some(Reason::Lazy(_, _))) {
 			self.state.trail.goto_assign_lit(propagated_lit);
+			lazy_reason = true;
 		}
 		// Create a clause from the reason
 		let clause = if let Some(reason) = reason {
@@ -230,6 +240,13 @@ impl PropagatorExtension for Engine {
 		};
 
 		self.state.tracing_statistics.explanations += 1;
+
+		// TODO: do we need to add to the clause database again?
+		if lazy_reason && self.state.config.forward_explanation {
+			self.state
+				.clauses
+				.push_back((clause.clone(), ClausePersistence::Forgettable));
+		}
 
 		debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add reason clause");
 		clause
@@ -382,10 +399,38 @@ impl PropagatorExtension for Engine {
 		if !self.state.clauses.is_empty() {
 			return Vec::new();
 		}
-		let queue = mem::take(&mut self.state.propagation_queue);
+		let mut queue = mem::take(&mut self.state.propagation_queue);
 		if queue.is_empty() {
 			return Vec::new(); // Early return to avoid tracing statements
 		}
+
+		if self.state.config.forward_explanation {
+			// Collect literals with eager/simple reason and add to clause database
+			let mut removed = Vec::new();
+			for (i, &lit) in queue.iter().enumerate() {
+				// TODO: how to avoid cloning the reason for Reason::Lazy or None?
+				if let Some(reason) = self.state.reason_map.get(&lit).cloned() {
+					match reason {
+						Reason::Eager(_) | Reason::Simple(_) => {
+							let clause: Clause =
+								reason.explain(&mut self.propagators, &mut self.state, Some(lit));
+							self.state
+								.clauses
+								.push_back((clause, ClausePersistence::Forgettable));
+							removed.push(i);
+						}
+						_ => {}
+					}
+				}
+			}
+
+			// Remove literals whose reasons are already in cluase database
+			removed.reverse();
+			removed.iter().for_each(|&i| {
+				let _ = queue.swap_remove(i);
+			});
+		}
+
 		debug!(
 			lits = ?queue
 				.iter()
@@ -679,6 +724,12 @@ impl State {
 	pub(crate) fn set_vsids_only(&mut self, enable: bool) {
 		self.config.vsids_only = enable;
 		self.vsids = enable;
+	}
+
+	/// Set whether the solver should eagerly forward explanation cluases to the
+	/// SAT engine.
+	pub(crate) fn set_forward_explanation(&mut self, enable: bool) {
+		self.config.forward_explanation = enable;
 	}
 
 	/// Set the interval in milliseconds to output propagator tracing information
