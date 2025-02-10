@@ -269,6 +269,9 @@ where
 
 		Ok(())
 	}
+	fn name(&self) -> String {
+		"IntDivBounds".to_string()
+	}
 }
 
 #[cfg(test)]

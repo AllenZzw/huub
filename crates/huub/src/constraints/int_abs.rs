@@ -133,6 +133,10 @@ where
 
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		"IntAbsBounds".to_string()
+	}
 }
 
 #[cfg(test)]

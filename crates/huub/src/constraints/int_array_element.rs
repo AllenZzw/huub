@@ -322,6 +322,10 @@ where
 
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		format!("IntDecisionArrayElementBounds({})", self.vars.len())
+	}
 }
 
 impl<S: SimplificationActions> Constraint<S> for IntValArrayElement {

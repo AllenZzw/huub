@@ -478,6 +478,22 @@ where
 		// output solving statistics
 		if self.statistics {
 			let stats = slv.search_statistics();
+
+			outputln!(&mut self.stdout, "%%%prop-stat: blockType={:?}", "trace_propagator");
+			slv.propagator_statistics()
+				.iter()
+				.for_each(|(name, stats)| {
+					outputln!(&mut self.stdout, "%%%prop-stat: name={}, propagations={:?}, conflicts={:?}, invocations={:?}, last_invoked={:?}, last_active={:?}", 
+					name, 
+					stats.propagations, 
+					stats.conflicts,
+					stats.invocations,
+					&(stats.last_invoked - start_solve).as_micros(),
+					&(stats.last_active - start_solve).as_micros(),
+					)
+		 		});
+			outputln!(&mut self.stdout, "%%%prop-stat-end");
+
 			print_statistics_block(
 				&mut self.stdout,
 				"complete",

@@ -341,6 +341,10 @@ where
 
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		"IntPowBounds".to_string()
+	}
 }
 
 #[cfg(test)]

@@ -164,6 +164,9 @@ where
 		// Method will only be called if `propagate` used a lazy reason.
 		panic!("propagator did not provide an explain implementation")
 	}
+
+	/// Return the name of the propagator.
+	fn name(&self) -> String;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

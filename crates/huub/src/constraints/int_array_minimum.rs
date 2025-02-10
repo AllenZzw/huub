@@ -142,6 +142,9 @@ where
 
 		Ok(())
 	}
+	fn name(&self) -> String {
+		"IntArrayMinimumBounds".to_string()
+	}
 }
 
 #[cfg(test)]

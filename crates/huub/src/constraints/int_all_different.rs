@@ -103,6 +103,10 @@ where
 		}
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		"IntAllDifferentValue".to_string()
+	}
 }
 
 #[cfg(test)]

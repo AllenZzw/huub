@@ -238,6 +238,9 @@ where
 		}
 		Ok(())
 	}
+	fn name(&self) -> String {
+		"IntTimesBounds".to_string()
+	}
 }
 
 #[cfg(test)]

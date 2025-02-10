@@ -16,6 +16,7 @@ use std::{
 };
 
 use delegate::delegate;
+use engine::TracePropagatorStatistics;
 use flatzinc_serde::FlatZinc;
 use itertools::Itertools;
 use pindakaas::{
@@ -798,6 +799,18 @@ impl<Oracle: PropagatingSolver<Engine>> Solver<Oracle> {
 		&self.engine().state.statistics
 	}
 
+	/// Access the statistics for the propagation process up to this point.
+	pub fn propagator_statistics(&self) -> Vec<(String, TracePropagatorStatistics)> {
+		self.engine()
+			.state
+			.tracing_statistics
+			.propagator_statistics
+			.iter()
+			.enumerate()
+			.map(|(i, s)| (self.engine().propagators[i].name(), s.clone()))
+			.collect()
+	}
+
 	/// Try and find a solution to the problem for which the Solver was
 	/// initialized.
 	pub fn solve(&mut self, on_sol: impl FnMut(&dyn Valuation)) -> SolveResult {
@@ -1016,6 +1029,13 @@ impl<Oracle: PropagatingSolver<Engine>> PropagatorInitActions for Solver<Oracle>
 		let p = engine.state.propagator_priority.push(priority);
 		debug_assert_eq!(prop_ref, p);
 		let p = self.engine_mut().state.enqueued.push(false);
+		debug_assert_eq!(prop_ref, p);
+		let p = self
+			.engine_mut()
+			.state
+			.tracing_statistics
+			.propagator_statistics
+			.push(TracePropagatorStatistics::default());
 		debug_assert_eq!(prop_ref, p);
 		p
 	}

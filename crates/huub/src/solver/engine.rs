@@ -79,19 +79,41 @@ pub struct SearchStatistics {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TracePropagatorStatistics {
+	/// Counter of propagator propagations
+	pub propagations: usize,
+	/// Counter of detected propagations
+	pub conflicts: usize,
+	/// Counter of propagator invocations
+	pub invocations: usize,
+	/// Last time the propagator is invoked
+	pub last_invoked: Instant,
+	/// Last time the propagaotr is active
+	pub last_active: Instant,
+}
+
+impl Default for TracePropagatorStatistics {
+	fn default() -> Self {
+		Self {
+			propagations: Default::default(),
+			conflicts: Default::default(),
+			invocations: Default::default(),
+			last_invoked: Instant::now(),
+			last_active: Instant::now(),
+		}
+	}
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct TraceStatistics {
 	/// Timer
 	pub(crate) timer: Instant,
-	/// Counter of propagator explanations in the last interval
+	/// Counter of propagator explanations
 	pub(crate) explanations: usize,
-	/// Counter of propagator propagations in the last interval
-	pub(crate) propagations: usize,
-	/// Counter of detected propagations in the last interval
-	pub(crate) conflicts: usize,
-	/// Counter of ineffective propagation calls in the last interval
-	pub(crate) no_propagations: usize,
 	/// Last time slot for propagator tracing
 	pub(crate) time_slot: u32,
+	/// Detailed statistics of each propagator
+	pub propagator_statistics: IndexVec<PropRef, TracePropagatorStatistics>,
 }
 
 impl Default for TraceStatistics {
@@ -99,36 +121,32 @@ impl Default for TraceStatistics {
 		Self {
 			timer: Instant::now(),
 			explanations: Default::default(),
-			propagations: Default::default(),
-			conflicts: Default::default(),
-			no_propagations: Default::default(),
 			time_slot: Default::default(),
+			propagator_statistics: Default::default(),
 		}
 	}
 }
 
 impl TraceStatistics {
-	pub(crate) fn reset(&mut self, interval: u32) {
-		self.time_slot = self.timer.elapsed().as_millis() as u32 / interval;
-		self.conflicts = 0;
-		self.propagations = 0;
-		self.no_propagations = 0;
-		self.explanations = 0;
+	#[inline]
+	pub(crate) fn check_next_slot(&mut self, interval: u32) -> bool {
+		let current_slot = self.timer.elapsed().as_millis() / interval as u128;
+		if current_slot - self.time_slot as u128 > 0 {
+			self.time_slot = current_slot as u32;
+			true
+		} else {
+			false
+		}
 	}
 
 	#[inline]
-	pub(crate) fn reach_next_slot(&self, interval: u32) -> bool {
-		self.timer.elapsed().as_millis() / interval as u128 - self.time_slot as u128 > 0
-	}
-
-	#[inline]
-	pub(crate) fn output(&self, interval: u32) {
+	pub(crate) fn trace(&self, interval: u32) {
 		info!(
-			"time={time} propagation results conflicts={conflicts}, propagations={propagations}, no_propagations={no_propagations}, explanations={explanations}, trace_interval={interval}", 
+			"time={time} propagation results conflicts={conflicts}, propagations={propagations}, invocation={invocations}, explanations={explanations}, trace_interval={interval}", 
 			time= self.time_slot,
-			conflicts = self.conflicts,
-			propagations = self.propagations,
-			no_propagations = self.no_propagations,
+			conflicts = self.propagator_statistics.iter().map(|s| s.conflicts).reduce(|a, b| a + b).unwrap(),
+			propagations = self.propagator_statistics.iter().map(|s| s.propagations).reduce(|a, b| a + b).unwrap(),
+			invocations = self.propagator_statistics.iter().map(|s| s.invocations).reduce(|a, b| a + b).unwrap(),
 			explanations = self.explanations,
 			interval = interval,
 		);

@@ -531,6 +531,13 @@ where
 		}
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		match self.reification.get() {
+			Some(_) => format!("IntLinearLessEqBoundsImpl({})", self.terms.len()),
+			None => format!("IntLinearLessEqBounds({})", self.terms.len()),
+		}
+	}
 }
 
 impl IntLinearLessEqImpBounds {
@@ -724,6 +731,13 @@ where
 			actions.set_bool(!r, self.reason(self.terms.len()))
 		} else {
 			Ok(())
+		}
+	}
+
+	fn name(&self) -> String {
+		match self.reification.get() {
+			Some(_) => format!("IntLinearNotEqValueImpl({})", self.terms.len()),
+			None => format!("IntLinearNotEqValue({})", self.terms.len()),
 		}
 	}
 }

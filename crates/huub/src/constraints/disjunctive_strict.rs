@@ -406,6 +406,10 @@ where
 		}
 		Ok(())
 	}
+
+	fn name(&self) -> String {
+		"DisjunctiveStrictEdgeFinding".to_string()
+	}
 }
 
 impl OmegaThetaTree {

@@ -2,7 +2,10 @@
 //! during the progation and solution checking process. This structure contains
 //! the implementation of the actions that are exposed to the propagators.
 
-use std::fmt::{self, Debug, Formatter};
+use std::{
+	fmt::{self, Debug, Formatter},
+	time::Instant,
+};
 
 use delegate::delegate;
 use index_vec::IndexVec;
@@ -139,9 +142,8 @@ impl<'a> SolvingContext<'a> {
 	pub(crate) fn run_propagators(&mut self, propagators: &mut IndexVec<PropRef, BoxedPropagator>) {
 		// Update tracing statistics on new decision level
 		if let Some(interval) = self.state.config.trace_interval {
-			if self.state.tracing_statistics.reach_next_slot(interval) {
-				self.state.tracing_statistics.output(interval);
-				self.state.tracing_statistics.reset(interval);
+			if self.state.tracing_statistics.check_next_slot(interval) {
+				self.state.tracing_statistics.trace(interval);
 			}
 		}
 
@@ -154,6 +156,8 @@ impl<'a> SolvingContext<'a> {
 			let prop = propagators[p].as_mut();
 			let res = prop.propagate(self);
 			self.state.statistics.propagations += 1;
+			self.state.tracing_statistics.propagator_statistics[p].invocations += 1;
+			self.state.tracing_statistics.propagator_statistics[p].last_invoked = Instant::now();
 			self.current_prop = PropRef::new(u32::MAX as usize);
 			if let Err(Conflict { subject, reason }) = res {
 				let clause: Clause = reason.explain(propagators, self.state, subject);
@@ -162,11 +166,11 @@ impl<'a> SolvingContext<'a> {
 				debug_assert!(self.state.conflict.is_none());
 				self.state.failed = true;
 				self.state.conflict = Some(clause);
-				self.state.tracing_statistics.conflicts += 1;
+				self.state.tracing_statistics.propagator_statistics[p].conflicts += 1;
+				self.state.tracing_statistics.propagator_statistics[p].last_active = Instant::now();
 			} else if propagation_before != self.state.propagation_queue.len() {
-				self.state.tracing_statistics.propagations += 1;
-			} else {
-				self.state.tracing_statistics.no_propagations += 1;
+				self.state.tracing_statistics.propagator_statistics[p].propagations += 1;
+				self.state.tracing_statistics.propagator_statistics[p].last_active = Instant::now();
 			}
 			if self.state.conflict.is_some() || !self.state.propagation_queue.is_empty() {
 				return;
