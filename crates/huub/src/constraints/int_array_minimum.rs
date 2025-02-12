@@ -143,7 +143,11 @@ where
 		Ok(())
 	}
 	fn name(&self) -> String {
-		"IntArrayMinimumBounds".to_string()
+		if self.vars.len() <= 3 {
+			format!("IntArrayMinimumBounds({})", self.vars.len())
+		} else {
+			"IntArrayMinimumBounds".to_string()
+		}
 	}
 }
 

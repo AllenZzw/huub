@@ -534,7 +534,10 @@ where
 
 	fn name(&self) -> String {
 		match self.reification.get() {
-			Some(_) => format!("IntLinearLessEqBoundsImpl({})", self.terms.len()),
+			Some(_) if self.terms.len() <= 3 => {
+				format!("IntLinearLessEqBoundsImpl({})", self.terms.len())
+			}
+			Some(_) => "IntLinearLessEqImpBounds".to_string(),
 			None => format!("IntLinearLessEqBounds({})", self.terms.len()),
 		}
 	}
@@ -736,6 +739,9 @@ where
 
 	fn name(&self) -> String {
 		match self.reification.get() {
+			Some(_) if self.terms.len() <= 3 => {
+				format!("IntLinearNotEqValueImpl({})", self.terms.len())
+			}
 			Some(_) => format!("IntLinearNotEqValueImpl({})", self.terms.len()),
 			None => format!("IntLinearNotEqValue({})", self.terms.len()),
 		}

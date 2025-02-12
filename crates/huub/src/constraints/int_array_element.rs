@@ -324,7 +324,11 @@ where
 	}
 
 	fn name(&self) -> String {
-		format!("IntDecisionArrayElementBounds({})", self.vars.len())
+		if self.vars.len() <= 3 {
+			format!("IntDecisionArrayElementBounds({})", self.vars.len())
+		} else {
+			"IntDecisionArrayElementBounds".to_string()
+		}
 	}
 }
 

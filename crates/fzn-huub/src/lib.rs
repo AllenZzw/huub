@@ -46,7 +46,7 @@ use huub::{
 	SlvTermSignal,
 };
 use pico_args::Arguments;
-use tracing::{subscriber::set_default, warn};
+use tracing::{info, subscriber::set_default, warn};
 use tracing_subscriber::fmt::MakeWriter;
 use ustr::{ustr, Ustr, UstrMap};
 
@@ -479,11 +479,10 @@ where
 		if self.statistics {
 			let stats = slv.search_statistics();
 
-			outputln!(&mut self.stdout, "%%%prop-stat: blockType={:?}", "trace_propagator");
 			slv.propagator_statistics()
 				.iter()
 				.for_each(|(name, stats)| {
-					outputln!(&mut self.stdout, "%%%prop-stat: name={}, propagations={:?}, conflicts={:?}, invocations={:?}, last_invoked={:?}, last_active={:?}", 
+					info!("prop-stat name={}, propagations={:?}, conflicts={:?}, invocations={:?}, last_invoked={:?}, last_active={:?}", 
 					name, 
 					stats.propagations, 
 					stats.conflicts,
@@ -492,7 +491,6 @@ where
 					&(stats.last_active - start_solve).as_micros(),
 					)
 		 		});
-			outputln!(&mut self.stdout, "%%%prop-stat-end");
 
 			print_statistics_block(
 				&mut self.stdout,
