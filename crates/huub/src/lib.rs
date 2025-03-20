@@ -1104,6 +1104,10 @@ impl Model {
 		if let Some(r) = any_slv.downcast_mut::<Cadical>() {
 			r.set_option("restart", config.restart() as i32);
 			r.set_option("vivify", config.vivification() as i32);
+			r.set_option("subsume", config.subsumption() as i32);
+			r.set_option("elim", config.variable_elimination() as i32);
+			r.set_option("probe", config.probing() as i32);
+			r.set_option("condition", config.conditioning() as i32);
 		} else {
 			warn!("unknown solver: vivification and restart options are ignored");
 		}

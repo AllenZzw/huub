@@ -96,6 +96,14 @@ pub struct Cli<Stdout, Stderr> {
 	toggle_vsids: bool,
 	/// Whether the vivification heuristic is enabled
 	vivification: bool,
+	/// Whether to enable the global forward subsumption in the oracle solver.
+	subsumption: bool,
+	/// Whether to enable the bounded variable elimination in the oracle solver.
+	variable_elimination: bool,
+	/// Whether to enable the failed literal probing in the oracle solver.
+	probing: bool,
+	/// Whether to enable the globally blocked clause elimination (conditioning)
+	conditioning: bool,
 	/// Switch to the VSIDS heuristic after a certain number of conflicts
 	vsids_after: Option<u32>,
 	/// Only use the SAT VSIDS heuristic for search
@@ -161,7 +169,11 @@ where
 		}
 		config = config
 			.with_restart(self.free_search || self.restart)
-			.with_vivification(self.vivification);
+			.with_vivification(self.vivification)
+			.with_subsumption(self.subsumption)
+			.with_variable_elimination(self.variable_elimination)
+			.with_probing(self.probing)
+			.with_conditioning(self.conditioning);
 		config
 	}
 
@@ -209,6 +221,18 @@ where
 		};
 
 		if self.statistics {
+			print_statistics_block(
+				&mut self.stdout,
+				"configs",
+				&[
+					("restart", &(self.restart as usize)),
+					("vivification", &(self.vivification as usize)),
+					("subsumption", &(self.subsumption as usize)),
+					("variableElimination", &(self.variable_elimination as usize)),
+					("probing", &(self.probing as usize)),
+					("conditioning", &(self.conditioning as usize)),
+				],
+			);
 			let stats = slv.init_statistics();
 			print_statistics_block(
 				&mut self.stdout,
@@ -285,7 +309,6 @@ where
 			slv.set_vsids_after(self.vsids_after);
 		}
 		slv.set_forward_limit(self.forward_limit);
-
 		slv.set_forward_explanation(self.forward_explanation);
 
 		// Determine Goal and Objective
@@ -532,6 +555,10 @@ where
 			restart: self.restart,
 			toggle_vsids: self.toggle_vsids,
 			vivification: self.vivification,
+			subsumption: self.subsumption,
+			variable_elimination: self.variable_elimination,
+			probing: self.probing,
+			conditioning: self.conditioning,
 			vsids_after: self.vsids_after,
 			vsids_only: self.vsids_only,
 			forward_limit: self.forward_limit,
@@ -557,6 +584,10 @@ where
 			restart: self.restart,
 			toggle_vsids: self.toggle_vsids,
 			vivification: self.vivification,
+			subsumption: self.subsumption,
+			variable_elimination: self.variable_elimination,
+			probing: self.probing,
+			conditioning: self.conditioning,
 			vsids_after: self.vsids_after,
 			vsids_only: self.vsids_only,
 			forward_limit: self.forward_limit,
@@ -607,6 +638,22 @@ impl TryFrom<Arguments> for Cli<io::Stdout, fn() -> io::Stderr> {
 			vivification: args
 				.opt_value_from_fn("--vivify", parse_bool_arg)
 				.map(|x| x.unwrap_or(false)) // TODO: investigate whether this can be re-enabled
+				.map_err(|e| e.to_string())?,
+			subsumption: args
+				.opt_value_from_fn("--subsumption", parse_bool_arg)
+				.map(|x| x.unwrap_or(true))
+				.map_err(|e| e.to_string())?,
+			variable_elimination: args
+				.opt_value_from_fn("--variable-elimination", parse_bool_arg)
+				.map(|x| x.unwrap_or(true))
+				.map_err(|e| e.to_string())?,
+			probing: args
+				.opt_value_from_fn("--probing", parse_bool_arg)
+				.map(|x| x.unwrap_or(true))
+				.map_err(|e| e.to_string())?,
+			conditioning: args
+				.opt_value_from_fn("--conditioning", parse_bool_arg)
+				.map(|x| x.unwrap_or(false))
 				.map_err(|e| e.to_string())?,
 			vsids_only: args.contains("--vsids-only"),
 			vsids_after: args
