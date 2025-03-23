@@ -119,6 +119,8 @@ pub struct Cli<Stdout, Stderr> {
 	/// Whether the solver should eagerly forward explanation cluases to the
 	/// SAT engine.
 	forward_explanation: bool,
+	/// Whether the CP engine is adaptive
+	adaptive_engine: bool,
 	// --- Output configuration ---
 	/// Output stream for (intermediate) solutions and statistics
 	///
@@ -247,6 +249,7 @@ where
 					("variableElimination", &(self.variable_elimination as usize)),
 					("probing", &(self.probing as usize)),
 					("conditioning", &(self.conditioning as usize)),
+					("adaptiveEngine", &(self.adaptive_engine as usize)),
 				],
 			);
 			let stats = slv.init_statistics();
@@ -326,6 +329,7 @@ where
 		}
 		slv.set_forward_limit(self.forward_limit);
 		slv.set_forward_explanation(self.forward_explanation);
+		slv.set_adaptive_engine(self.adaptive_engine);
 
 		// Determine Goal and Objective
 		let start_solve = Instant::now();
@@ -571,6 +575,7 @@ where
 			vsids_only: self.vsids_only,
 			forward_limit: self.forward_limit,
 			forward_explanation: self.forward_explanation,
+			adaptive_engine: self.adaptive_engine,
 			stdout: self.stdout,
 		}
 	}
@@ -603,6 +608,7 @@ where
 			vsids_only: self.vsids_only,
 			forward_limit: self.forward_limit,
 			forward_explanation: self.forward_explanation,
+			adaptive_engine: self.adaptive_engine,
 			stderr: self.stderr,
 			ansi_color: self.ansi_color,
 		}
@@ -687,6 +693,7 @@ impl TryFrom<Arguments> for Cli<io::Stdout, fn() -> io::Stderr> {
 				.map(|x| x.unwrap_or(1))
 				.map_err(|e| e.to_string())?,
 			forward_explanation: args.contains("--forward-explanation"),
+			adaptive_engine: args.contains("--adaptive-engine"),
 
 			verbose,
 			path: args

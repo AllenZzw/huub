@@ -77,6 +77,16 @@ pub struct SearchStatistics {
 }
 
 #[derive(Clone, Debug, Default)]
+pub(crate) struct EventStat {
+	/// The current ratio of the event
+	pub(crate) ratio: f64,
+	/// The threshold of the ratio for the event
+	pub(crate) bound: f64,
+	/// The decaying factor of the ratio
+	pub(crate) decay: f64,
+}
+
+#[derive(Clone, Debug, Default)]
 /// Internal state representation of the propagation engine disconnected from
 /// the storage of the propagators and branchers.
 ///
@@ -117,6 +127,18 @@ pub struct State {
 	pub(crate) statistics: SearchStatistics,
 	/// Whether VSIDS is currently enabled
 	pub(crate) vsids: bool,
+
+	// ---- Adaptive Propagation Infrastructure ---
+	/// Whether the engine is currently active
+	pub(crate) active: bool,
+	/// Number of propagated literals after the last check
+	pub(crate) propagated: usize,
+	/// Number of calls to the propagation engine after the last check  
+	pub(crate) calls: usize,
+	/// The event stat for engine activation
+	pub(crate) activation: EventStat,
+	/// The event stat for engine deactivation
+	pub(crate) deactivation: EventStat,
 
 	// ---- Queueing Infrastructure ----
 	/// Boolean variable enqueueing information
@@ -229,6 +251,10 @@ impl PropagatorExtension for Engine {
 
 		let accept = self.state.conflict.is_none();
 		debug!(accept, "check model");
+
+		if self.state.config.adaptive_engine {
+			self.state.update_adaptive(accept);
+		}
 
 		// Increment the number of solutions found
 		if accept {
@@ -397,8 +423,12 @@ impl PropagatorExtension for Engine {
 		}
 		if self.state.propagation_queue.is_empty() && self.state.conflict.is_none() {
 			// If there are no previous changes, run propagators
-			SolvingContext::new(slv, &mut self.state).run_propagators(&mut self.propagators);
+			if self.state.active {
+				SolvingContext::new(slv, &mut self.state).run_propagators(&mut self.propagators);
+				self.state.calls += 1;
+			}
 		}
+		self.state.propagated += self.state.propagation_queue.len() + self.state.clauses.len();
 		// Check whether there are new clauses that need to be communicated first
 		if !self.state.clauses.is_empty() {
 			return Vec::new();
@@ -516,6 +546,57 @@ impl SearchStatistics {
 }
 
 impl State {
+	#[inline]
+	fn enable(&mut self) {
+		self.active = true;
+	}
+
+	#[inline]
+	fn disable(&mut self) {
+		self.active = false;
+	}
+
+	#[inline]
+	pub fn set_activation_stat(&mut self, ratio: f64, bound: f64, decay: f64) {
+		self.activation.ratio = ratio;
+		self.activation.bound = bound;
+		self.activation.decay = decay;
+	}
+
+	#[inline]
+	pub fn set_deactivation_stat(&mut self, ratio: f64, bound: f64, decay: f64) {
+		self.deactivation.ratio = ratio;
+		self.deactivation.bound = bound;
+		self.deactivation.decay = decay;
+	}
+
+	#[inline]
+	fn update_adaptive(&mut self, accept: bool) {
+		// decaying increment
+		self.activation.ratio = self.activation.ratio / self.activation.decay;
+		if self.calls != 0 {
+			self.activation.ratio += self.propagated as f64 / self.calls as f64;
+		}
+
+		self.deactivation.ratio = self.deactivation.ratio / self.deactivation.decay;
+		if accept {
+			self.deactivation.ratio += 1.0;
+		}
+
+		if accept && self.active {
+			if self.activation.ratio < self.activation.bound {
+				self.disable();
+			}
+		} else if !accept && !self.active {
+			if self.deactivation.ratio > self.deactivation.bound {
+				self.enable();
+			}
+		}
+
+		self.calls = 0;
+		self.propagated = 0;
+	}
+
 	/// Returns the current decision level of the solver.
 	fn decision_level(&self) -> u32 {
 		self.trail.decision_level()
@@ -539,8 +620,10 @@ impl State {
 		self.propagation_queue.clear();
 		// Backtrack trail
 		self.trail.notify_backtrack(level);
-		// Empty propagation queue
-		while self.propagator_queue.pop().is_some() {}
+		// Empty propagation queue if the engine is currently active
+		if self.active {
+			while self.propagator_queue.pop().is_some() {}
+		}
 		if ARTIFICIAL {
 			return;
 		}
@@ -638,6 +721,14 @@ impl State {
 	/// Set maximum number of terms in linear inequality constraint
 	pub(crate) fn set_forward_limit(&mut self, forward_limit: usize) {
 		self.config.forward_limit = forward_limit;
+	}
+
+	/// Set whether the CP engine is adaptive
+	pub(crate) fn set_adaptive_engine(&mut self, enable: bool) {
+		self.config.adaptive_engine = enable;
+		self.set_activation_stat(0.0, 2.0, 0.2);
+		self.set_deactivation_stat(0.0, 2.0, 2.0);
+		self.active = true; // enable the engine initially
 	}
 }
 

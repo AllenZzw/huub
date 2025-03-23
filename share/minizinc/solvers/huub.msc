@@ -19,9 +19,11 @@
     ["--variable-elimination","whether to enable the bounded variable elimination ","bool:false:true","false"],
     ["--probing","whether to enable the failed literal probing","bool:false:true","false"],
     ["--conditioning","whether to enable the globally blocked clause elimination","bool:false:true","false"],
+    ["--output-solutions", "Whether to output solutions", "bool:false:true", "true"],
     ["--vsids-after", "Switch to activity-based search heuristic provided by the SAT solver after the given number of conflicts.", "int", "0"],
     ["--vsids-only", "Only use the activity-based search provided by the SAT solver", "bool", "false"],
     ["--forward-explanation", "Whether to use forward explanation for CP propagators", "bool", "false"],
-    ["--forward-limit", "the number of literals in an explanation at which the engine forwards explanations to the SAT solver as external clauses.", "int", "1"]
+    ["--forward-limit", "the number of literals in an explanation at which the engine forwards explanations to the SAT solver as external clauses.", "int", "1"],
+    ["--adaptive-engine", "whether the CP engine is adaptive", "bool", "false"]
   ]
 }

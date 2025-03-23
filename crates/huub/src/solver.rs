@@ -185,6 +185,8 @@ pub(crate) struct SolverConfiguration {
 	forward_limit: usize,
 	/// Whether the engine forward explanation cluase eagerly
 	forward_explanation: bool,
+	/// Whether the CP engine is adaptive
+	adaptive_engine: bool,
 }
 
 /// A trait for a function that can be used to evaluate a `SolverView` to a
@@ -886,6 +888,8 @@ impl<Oracle: PropagatingSolver<Engine>> Solver<Oracle> {
 			pub fn set_forward_explanation(&mut self, enable: bool);
 			/// Set maximum number of terms in linear inequality constraint
 			pub fn set_forward_limit(&mut self, forward_limit: usize);
+			/// Set whether the CP engine is adaptive
+			pub fn set_adaptive_engine(&mut self, enable: bool);
 		}
 	}
 }
