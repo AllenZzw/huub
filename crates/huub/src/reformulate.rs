@@ -20,6 +20,7 @@ use crate::{
 	},
 	constraints::{
 		bool_array_element::BoolDecisionArrayElement,
+		cumulative::Cumulative,
 		disjunctive_strict::DisjunctiveStrict,
 		int_abs::IntAbs,
 		int_all_different::IntAllDifferent,
@@ -94,6 +95,7 @@ pub(crate) enum BoolDecisionInner {
 pub(crate) enum ConstraintStore {
 	BoolDecisionArrayElement(BoolDecisionArrayElement),
 	BoolFormula(BoolFormula),
+	Cumulative(Cumulative),
 	DisjunctiveStrict(DisjunctiveStrict),
 	IntAbs(IntAbs),
 	IntAllDifferent(IntAllDifferent),
@@ -263,6 +265,9 @@ impl ConstraintStore {
 			}
 			ConstraintStore::BoolFormula(exp) => {
 				<Formula<BoolDecision> as Constraint<Model>>::to_solver(exp, &mut actions)
+			}
+			ConstraintStore::Cumulative(con) => {
+				<Cumulative as Constraint<Model>>::to_solver(con, &mut actions)
 			}
 			ConstraintStore::DisjunctiveStrict(con) => {
 				<DisjunctiveStrict as Constraint<Model>>::to_solver(con, &mut actions)
