@@ -20,7 +20,7 @@ use crate::{
 		trail::TrailedInt,
 		BoolView, BoolViewInner, BoxedPropagator, IntView, IntViewInner,
 	},
-	Clause, IntLitMeaning, IntVal,
+	IntLitMeaning, IntVal,
 };
 
 /// Type used to communicate whether a change is redundant, conflicting, or new.
@@ -161,13 +161,10 @@ impl<'a> SolvingContext<'a> {
 			let res = prop.propagate(self);
 			self.state.statistics.propagations += 1;
 			self.current_prop = PropRef::new(u32::MAX as usize);
-			if let Err(Conflict { subject, reason }) = res {
-				let clause: Clause = reason.explain(propagators, self.state, subject);
-				trace!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "conflict detected");
-				debug_assert!(!clause.is_empty());
+			if let Err(conflict) = res {
 				debug_assert!(self.state.conflict.is_none());
 				self.state.failed = true;
-				self.state.conflict = Some(clause);
+				self.state.conflict = Some(conflict);
 			}
 			if self.state.conflict.is_some() || !self.state.propagation_queue.is_empty() {
 				return;

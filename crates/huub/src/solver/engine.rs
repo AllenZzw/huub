@@ -37,7 +37,7 @@ use tracing::{debug, trace};
 use crate::{
 	actions::{DecisionActions, ExplanationActions, InspectionActions, TrailingActions},
 	branchers::{BoxedBrancher, Decision},
-	constraints::{BoxedPropagator, Reason},
+	constraints::{BoxedPropagator, Conflict, Reason},
 	solver::{
 		activation_list::{ActivationList, IntEvent},
 		bool_to_int::BoolToIntMap,
@@ -102,7 +102,7 @@ pub struct State {
 	/// Reasons for setting values
 	pub(crate) reason_map: HashMap<RawLit, Reason>,
 	/// Whether conflict has (already) been detected
-	pub(crate) conflict: Option<Clause>,
+	pub(crate) conflict: Option<Conflict>,
 	/// Whether the solver is in a failure state.
 	///
 	/// Triggered when a conflict is detected during propagation, the solver
@@ -137,7 +137,7 @@ pub struct State {
 impl PropagatorExtension for Engine {
 	fn add_external_clause(
 		&mut self,
-		_slv: &mut dyn SolvingActions,
+		slv: &mut dyn SolvingActions,
 	) -> Option<(Clause, ClausePersistence)> {
 		if !self.state.clauses.is_empty() {
 			let clause = self.state.clauses.pop_front(); // Known to be `Some`
@@ -146,8 +146,13 @@ impl PropagatorExtension for Engine {
 		} else if !self.state.propagation_queue.is_empty() {
 			None // Require that the solver first applies the remaining propagation
 		} else if let Some(conflict) = self.state.conflict.take() {
-			debug!(clause = ?conflict.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add conflict clause");
-			Some((conflict, ClausePersistence::Forgettable))
+			let ctx = SolvingContext::new(slv, &mut self.state);
+			let clause: Vec<RawLit> =
+				conflict
+					.reason
+					.explain(&mut self.propagators, ctx.state, conflict.subject);
+			debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add conflict clause");
+			Some((clause, ClausePersistence::Forgettable))
 		} else {
 			None
 		}
@@ -156,8 +161,16 @@ impl PropagatorExtension for Engine {
 	fn add_reason_clause(&mut self, propagated_lit: RawLit) -> Clause {
 		// Find reason
 		let reason = self.state.reason_map.remove(&propagated_lit);
-		// Restore the current state to the state when the propagation happened if explaining lazily
-		if matches!(reason, Some(Reason::Lazy(_))) {
+		// Restore the current state to the state when the propagation happened
+		// if the reason is lazy and the literal is not assigned to false.
+		// If the literal is assigned to false, the explanation clause is a conflict.
+		if matches!(reason, Some(Reason::Lazy(_)))
+			&& self
+				.state
+				.trail
+				.get_sat_value(propagated_lit)
+				.unwrap_or(true)
+		{
 			self.state.trail.goto_assign_lit(propagated_lit);
 		}
 		// Create a clause from the reason
@@ -272,11 +285,6 @@ impl PropagatorExtension for Engine {
 
 	fn notify_assignments(&mut self, lits: &[RawLit]) {
 		debug!(lits = ?lits.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "assignments");
-		// Avoid doing more work if we are already in a failed state, but continue
-		// in debug mode to check all reasons
-		if self.state.failed && !cfg!(debug_assertions) {
-			return;
-		}
 
 		// Enqueue propagators
 		for &lit in lits {
