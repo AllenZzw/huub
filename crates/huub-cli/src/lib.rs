@@ -298,8 +298,14 @@ where
 					}
 				}
 			}
-			*lit_reverse_map.lock().unwrap() = lit_map;
-			*int_reverse_map.lock().unwrap() = int_map;
+			let mut lit_guard = lit_reverse_map.lock().unwrap();
+			let mut int_guard = int_reverse_map.lock().unwrap();
+			lit_map.into_iter().for_each(|(lit, name)| {
+				let _ = lit_guard.insert(lit, name);
+			});
+			int_map.into_iter().for_each(|name| {
+				int_guard.push(name);
+			});
 		}
 
 		// Set Solver Configuration
