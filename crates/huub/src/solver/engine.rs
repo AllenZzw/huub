@@ -316,11 +316,23 @@ impl PropagatorExtension for Engine {
 
 		// Process propagation results, and accept model if no conflict is detected
 		let conflict = self.state.conflict.take();
+		let conflict_explained = conflict.map(|c| {
+			// Ensure the lazy reason to be converted into an eager one
+			let ctx = SolvingContext::new(slv, &mut self.state);
+			let clause: Clause = c
+				.reason
+				.explain(&mut self.propagators, ctx.state, c.subject);
+			debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "conflict clause");
+			Conflict {
+				subject: c.subject,
+				reason: Reason::Eager(clause.into()),
+			}
+		});
 
 		// Revert to real decision level
 		self.state.notify_backtrack::<true>(level as usize, false);
 		debug_assert!(self.state.conflict.is_none());
-		self.state.conflict = conflict;
+		self.state.conflict = conflict_explained;
 
 		let accept = self.state.conflict.is_none();
 		debug!(accept, "check model");
