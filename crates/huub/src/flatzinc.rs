@@ -1618,7 +1618,7 @@ where
 	/// Unify variables in the [`Model`] that are know to be equivalent.
 	///
 	/// This can happen because of `bool_eq` and `int_eq` constraints in the
-	/// [`FlatZinc`] instance.
+	/// [`FlatZinc`] instance, or because of the `rhs` property of a variable.
 	pub(crate) fn unify_variables(&mut self) -> Result<(), FlatZincError> {
 		let mut unify_map = FxHashMap::<S, Rc<RefCell<Vec<Literal<S>>>>>::default();
 		let unify_map_find = |map: &FxHashMap<S, Rc<RefCell<Vec<Literal<S>>>>>, a: &Literal<S>| {
@@ -1629,9 +1629,11 @@ where
 			}
 		};
 
-		let record_unify = |map: &mut FxHashMap<S, Rc<RefCell<Vec<Literal<S>>>>>, a, b| {
-			let a_set = unify_map_find(map, a);
-			let b_set = unify_map_find(map, b);
+		let merge_sets = |map: &mut FxHashMap<S, Rc<RefCell<Vec<Literal<S>>>>>,
+		                  a_set: Option<Rc<RefCell<Vec<Literal<S>>>>>,
+		                  b_set: Option<Rc<RefCell<Vec<Literal<S>>>>>,
+		                  a: Literal<S>,
+		                  b: Literal<S>| {
 			match (a_set, b_set) {
 				(Some(a_set), Some(b_set)) => {
 					let mut members = (*a_set).borrow_mut();
@@ -1668,6 +1670,26 @@ where
 			};
 		};
 
+		let record_unify = |map: &mut FxHashMap<S, Rc<RefCell<Vec<Literal<S>>>>>, a, b| {
+			let a_set = unify_map_find(map, a);
+			let b_set = unify_map_find(map, b);
+			merge_sets(map, a_set, b_set, a.clone(), b.clone());
+		};
+
+		// Unify variables with their `rhs` value
+		for (s, v) in self.fzn.variables.iter() {
+			match &v.value {
+				Some(l) => {
+					let a_lit = Literal::Identifier(s.clone());
+					let a_set = unify_map_find(&unify_map, &a_lit);
+					let b_set = unify_map_find(&unify_map, l);
+					merge_sets(&mut unify_map, a_set, b_set, a_lit, l.clone());
+				}
+				_ => {}
+			}
+		}
+
+		// Unify variables based on constraints
 		for (i, c) in self.fzn.constraints.iter().enumerate() {
 			if self.processed[i] {
 				continue;
@@ -1786,8 +1808,7 @@ where
 			// Map (or equate) all names in the group to the new variable
 			for lit in li.iter() {
 				if let Literal::Identifier(id) = lit {
-					let prev = self.map.insert(id.clone(), var.clone());
-					debug_assert_eq!(prev, None);
+					let _ = self.map.insert(id.clone(), var.clone());
 				}
 			}
 		}
