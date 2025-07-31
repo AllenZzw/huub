@@ -68,7 +68,7 @@ impl<S: SimplificationActions> Constraint<S> for Cumulative {
 		// Check if the cumulative constraint is trivially unsatisfiable
 		let mut earliest_start = IntVal::MAX;
 		let mut latest_completion = IntVal::MIN;
-		let capacity = actions.get_int_lower_bound(self.capacity);
+		let capacity = actions.get_int_upper_bound(self.capacity);
 		let mut total_energy = 0;
 		for i in 0..self.start_times.len() {
 			let duration = actions.get_int_lower_bound(self.durations[i]);
