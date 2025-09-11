@@ -17,6 +17,9 @@ itertools = "0.14.0"
 pindakaas = { git = "https://github.com/pindakaashq/pindakaas.git", features = [
 	"external-propagation",
 ] }
+pindakaas-cadical = { git = "https://github.com/pindakaashq/pindakaas.git", features = [
+	"tracing",
+] }
 rangelist = "0.3.1"
 rustc-hash = { workspace = true }
 tracing = { workspace = true }

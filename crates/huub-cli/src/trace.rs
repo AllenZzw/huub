@@ -118,7 +118,7 @@ where
 			_ => Level::TRACE, // 2 or more
 		})
 		.with_writer(make_writer)
-		.with_ansi(ansi)
+		.with_ansi(false)
 		.with_timer(uptime())
 		.map_fmt_fields(|fmt| {
 			FmtLitFields::new(fmt, Arc::clone(&lit_reverse_map), int_reverse_map)

@@ -686,7 +686,7 @@ impl TryFrom<Arguments> for Cli<io::Stdout, fn() -> io::Stderr> {
 			stdout: io::stdout(),
 			#[expect(trivial_casts, reason = "doesn't compile without the case")]
 			stderr: io::stderr as fn() -> io::Stderr,
-			ansi_color: true,
+			ansi_color: false,
 		};
 
 		let remaining = args.finish();

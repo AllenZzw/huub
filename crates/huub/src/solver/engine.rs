@@ -339,7 +339,7 @@ impl PropagatorExtension for Engine {
 			vec![propagated_lit]
 		};
 
-		debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "add reason clause");
+		debug!(clause = ?clause.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), lit = i32::from(propagated_lit), "add reason clause");
 		clause
 	}
 

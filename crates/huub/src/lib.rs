@@ -16,6 +16,8 @@ pub mod flatzinc;
 pub(crate) mod helpers;
 pub mod reformulate;
 pub mod solver;
+use pindakaas_cadical as _;
+
 #[cfg(test)]
 pub(crate) mod tests;
 
@@ -1194,6 +1196,9 @@ impl Model {
 			r.set_option("probe", config.probing() as i32);
 			r.set_option("subsume", config.subsumption() as i32);
 			r.set_option("vivify", config.vivification() as i32);
+			// Set the solver options for logging and verbosity
+			r.set_option("log", 1);
+			r.set_option("verbose", 3);
 
 			// Set the solver options for search configurations
 			// Enable restart if the config is set to true or if there are no
