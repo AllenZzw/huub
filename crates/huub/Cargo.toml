@@ -14,10 +14,10 @@ repository.workspace = true
 flatzinc-serde = { workspace = true }
 index_vec = "0.1.3"
 itertools = "0.14.0"
-pindakaas = { git = "https://github.com/pindakaashq/pindakaas.git", features = [
+pindakaas = { path = "/Users/azho0028/Desktop/Research/pindakaas/crates/pindakaas", features = [
 	"external-propagation",
 ] }
-pindakaas-cadical = { git = "https://github.com/pindakaashq/pindakaas.git", features = [
+pindakaas-cadical = { path = "/Users/azho0028/Desktop/Research/pindakaas/crates/pindakaas-cadical", features = [
 	"tracing",
 ] }
 rangelist = "0.3.1"
