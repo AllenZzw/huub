@@ -1191,7 +1191,7 @@ impl Model {
 			// Set the solver options for logging and verbosity
 			r.set_option("log", 1);
 			r.set_option("verbose", 3);
-			
+			// r.set_option("exteagerreasons", 0);
 			// Set the solver options for preprocessing/inprocessing
 			r.set_option("condition", config.conditioning() as i32);
 			r.set_option("elim", config.variable_elimination() as i32);

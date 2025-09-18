@@ -308,6 +308,7 @@ dependencies = [
  "index_vec",
  "itertools",
  "pindakaas",
+ "pindakaas-cadical",
  "rangelist",
  "rustc-hash",
  "tracing",
@@ -545,7 +546,6 @@ checksum = "3b3cff922bd51709b605d9ead9aa71031d81447142d828eb4a6eba76fe619f9b"
 [[package]]
 name = "pindakaas"
 version = "0.1.0"
-source = "git+https://github.com/pindakaashq/pindakaas.git#fa797b8cbe253fd247e839c9f9bb954f4c48f7a3"
 dependencies = [
  "itertools",
  "pindakaas-cadical",
@@ -556,7 +556,6 @@ dependencies = [
 [[package]]
 name = "pindakaas-cadical"
 version = "0.1.0"
-source = "git+https://github.com/pindakaashq/pindakaas.git#fa797b8cbe253fd247e839c9f9bb954f4c48f7a3"
 dependencies = [
  "cc",
 ]
