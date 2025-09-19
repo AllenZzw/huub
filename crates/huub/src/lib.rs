@@ -1191,7 +1191,7 @@ impl Model {
 			// Set the solver options for logging and verbosity
 			r.set_option("log", 1);
 			r.set_option("verbose", 3);
-			// r.set_option("exteagerreasons", 0);
+			r.set_option("exteagerreasons", 0);
 			// Set the solver options for preprocessing/inprocessing
 			r.set_option("condition", config.conditioning() as i32);
 			r.set_option("elim", config.variable_elimination() as i32);
@@ -1200,8 +1200,6 @@ impl Model {
 			r.set_option("probe", config.probing() as i32);
 			r.set_option("subsume", config.subsumption() as i32);
 			r.set_option("vivify", config.vivification() as i32);
-			r.set_option("exteagerreasons", 0);
-			
 			// Set the solver options for search configurations
 			// Enable restart if the config is set to true or if there are no
 			// user search heuristics are provided
