@@ -651,6 +651,20 @@ where
 				if let [b, Argument::Literal(Literal::Identifier(x))] = c.args.as_slice() {
 					let b = arg_bool_view(self, b)?;
 					add_view(self, x.clone(), IntDecision::from(b).into())?;
+					// Further restrict the Boolean variable if the integer variable is
+					// fixed to 0/1
+					if let Some(var) = self.fzn.variables.get(x) {
+						match &var.domain {
+							Some(Domain::Int(r)) if r.upper_bound() == r.lower_bound() => {
+								match r.lower_bound() {
+									Some(0) => self.prb.set_bool(!b)?,
+									Some(1) => self.prb.set_bool(b)?,
+									_ => {}
+								};
+							}
+							_ => {}
+						}
+					}
 				}
 			}
 			"bool_not" => match c.args.as_slice() {
