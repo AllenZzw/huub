@@ -262,21 +262,46 @@ where
 			let mut int_map = int_reverse_map.lock().unwrap();
 			debug_assert!(int_map.is_empty());
 			*int_map = vec![ustr(""); slv.init_statistics().int_vars()];
-			for (name, v) in &var_map {
-				match v {
-					View::Bool(bv) => {
-						if let Some(info) = bv.reverse_map_info() {
-							let _ = lit_map.insert(info, LitName::BoolVar(*name, true));
-							let _ = lit_map.insert(-info, LitName::BoolVar(*name, false));
+
+			let mut sorted_vars: Vec<_> = var_map.iter().collect();
+			sorted_vars.sort_by_key(|(name, _)| {
+				let s = name.as_str();
+				if let Some(idx) = s.find("X_INTRODUCED_") {
+					let rest = &s[idx + "X_INTRODUCED_".len()..];
+					if let Some(end_idx) = rest.find('_') {
+						if let Ok(num) = rest[..end_idx].parse::<u32>() {
+							return num;
 						}
 					}
+				}
+				u32::MAX // Put non-matching names at the end
+			});
+			for (name, v) in sorted_vars {
+				match v {
+					// TODO: modify this to record the name for non-defined bool vars only
+					View::Bool(bv) => {
+						if let Some(info) = bv.reverse_map_info() {
+							if !lit_map.contains_key(&info) && !lit_map.contains_key(&-info) {
+								let _ = lit_map.insert(info, LitName::BoolVar(*name, true));
+								let _ = lit_map.insert(-info, LitName::BoolVar(*name, false));
+							}
+						}
+					}
+					_ => {}
+				}
+			}
+
+			for (name, v) in &var_map {
+				match v {
 					View::Int(iv) => {
 						let (pos, is_view) = iv.int_reverse_map_info();
 						if let Some(i) = pos {
 							if !is_view || int_map[i].is_empty() {
 								int_map[i] = *name;
 								for (lit, meaning) in iv.lit_reverse_map_info(&slv) {
-									let _ = lit_map.insert(lit, LitName::IntLit(i, meaning));
+									if !lit_map.contains_key(&lit) {
+										let _ = lit_map.insert(lit, LitName::IntLit(i, meaning));
+									}
 								}
 							} else {
 								debug_assert!(iv
@@ -299,6 +324,7 @@ where
 							}
 						}
 					}
+					_ => {}
 				}
 			}
 		}
