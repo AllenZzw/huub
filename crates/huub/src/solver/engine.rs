@@ -481,7 +481,7 @@ impl PropagatorExtension for Engine {
 		SearchDecision::Free
 	}
 
-	fn notify_assignments(&mut self, lits: &[RawLit]) {
+	fn notify_assignment(&mut self, lits: &[RawLit]) {
 		debug!(lits = ?lits.iter().map(|&x| i32::from(x)).collect::<Vec<i32>>(), "assignments");
 
 		self.state.trail.reset_to_trail_head();
