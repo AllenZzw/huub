@@ -2621,6 +2621,9 @@ impl Model {
 			r.set_option("subsume", config.subsumption() as i32);
 			r.set_option("vivify", config.vivification() as i32);
 
+			// Disable light preprocessing as it may degrade performance
+			r.set_option("preprocesslight", 0);
+
 			// Set the solver options for search configurations
 			// Enable restart if the config is set to true or if there are no
 			// user search heuristics are provided
