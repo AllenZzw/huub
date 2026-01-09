@@ -996,7 +996,7 @@ where
 			};
 			if let Some(lb) = self.lowest_index(ctx, i) {
 				// Deal with increase of lower bound.
-				if lb > k {
+				if lb > k && lb < self.last.len(){
 					ctx.set_trailed_int(self.last[lb], i as IntVal);
 					// Update highest lower bound if necessary.
 					if lb as IntVal > ctx.trailed_int(self.max_last) {
