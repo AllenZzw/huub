@@ -922,7 +922,8 @@ impl State {
 
 		// Switch to VSIDS if the number of conflicts exceeds the threshold
 		if let Some(conflicts) = self.config.vsids_after_conflict {
-			if !self.config.vsids_only
+			if !self.vsids 
+			    && !self.config.vsids_only
 				&& !self.config.toggle_vsids
 				&& self.statistics.conflicts > conflicts as u64
 			{
