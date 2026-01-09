@@ -501,25 +501,25 @@ impl<I1, I2, I3, I4> CumulativeTimeTable<I1, I2, I3, I4> {
 		// Find the maximum usage in the interval [lst, ect]
 		// where the task has a compulsory part
 		let begin = self.bounds.partition_point(|&b| b < lst);
-		let mut max_period = begin;
-		let mut max_usage = self.heights[begin];
-		for i in (begin + 1)..self.bounds.len() {
-			if self.bounds[i] >= ect {
-				break;
-			} else if self.heights[i] > max_usage {
-				max_usage = self.heights[i];
-				max_period = i;
-			}
-		}
+		let end = self.bounds.partition_point(|&b| b < ect);
+		let (max_period, max_usage) = ((begin + 1)..end).fold(
+			(None, None),
+			|(max_period, max_usage), i| {
+				if max_usage.map_or(true, |u| self.heights[i] > u) {
+					(Some(i), Some(self.heights[i]))
+				} else {
+					(max_period, max_usage)
+				}
+			},
+		); 
 
-		let limit = self.capacity.upper_bound(ctx) - max_usage + usage_lb;
-		if limit < self.usages[task].upper_bound(ctx) {
+		if let (Some(max_period), Some(max_usage)) = (max_period, max_usage) {
+			let limit = self.capacity.upper_bound(ctx) - max_usage + usage_lb;
 			trace!(
 				task,
 				compulosary_part =? (lst, ect),
 				max_period,
 				max_usage,
-				limit,
 				"Limit task usage"
 			);
 			self.usages[task].set_upper_bound(
