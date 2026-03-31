@@ -5,12 +5,13 @@ use std::cmp;
 
 use itertools::{Either, Itertools};
 use rangelist::RangeList;
+use tracing::trace;
 
 use crate::{
 	IntVal,
 	actions::{
 		InitActions, IntDecisionActions, IntInspectionActions, IntSimplificationActions,
-		PostingActions, ReasoningEngine,
+		PostingActions, PropagationActions, ReasoningEngine,
 	},
 	constraints::{
 		Constraint, IntModelActions, IntSolverActions, Propagator, SimplificationStatus,
@@ -118,14 +119,21 @@ where
 	E: ReasoningEngine,
 	View<IntVal>: IntModelActions<E>,
 {
+	#[tracing::instrument(
+		name = "int_unique_simplify",
+		target = "solver",
+		level = "trace",
+		skip(self, ctx)
+	)]
 	fn simplify(
 		&mut self,
 		ctx: &mut E::PropagationCtx<'_>,
 	) -> Result<SimplificationStatus, E::Conflict> {
+		// Bounds consistent propagation
 		self.propagate(ctx)?;
 
-		// TODO: Should this just use the value consistent propagator, or should this
-		// not be done by the bounds consistent propagator?
+		// Partition variables into fixed and unfixed, and check for conflicts between
+		// fixed variables.
 		let (vals, vars): (Vec<_>, Vec<_>) =
 			self.prop.var.iter().enumerate().partition_map(|(i, &var)| {
 				if let Some(val) = var.val(ctx) {
@@ -134,6 +142,24 @@ where
 					Either::Right(var)
 				}
 			});
+
+		// Checking for conflicts: if there are two fixed variables with the same value,
+		// we have a conflict.
+		if let Some(conflict) = vals.iter().combinations(2).find(|pair| {
+			let (i1, v1) = pair[0];
+			let (i2, v2) = pair[1];
+			v1 == v2 && i1 != i2
+		}) {
+			let i1 = conflict[0].0;
+			let i2 = conflict[1].0;
+			let lit1 = self.prop.var[i1].val_lit(ctx).unwrap();
+			let lit2 = self.prop.var[i2].val_lit(ctx).unwrap();
+			return Err(ctx.declare_conflict([lit1, lit2]));
+		}
+
+		// If any variables are fixed, remove their values from the domains of all
+		// remaining variables. Then, update the variable list and all caches to only
+		// include the unfixed variables.
 		if !vals.is_empty() {
 			let neg: RangeList<_> = vals.iter().map(|&(_, v)| v..=v).collect();
 			for var in &vars {
@@ -157,6 +183,7 @@ where
 			self.prop.var = vars;
 		}
 
+		// If all variables are fixed, mark the constraint as subsumed.
 		if self.prop.var.iter().all(|v| v.val(ctx).is_some()) {
 			return Ok(SimplificationStatus::Subsumed);
 		}
@@ -186,7 +213,14 @@ where
 		self.prop.initialize(ctx);
 	}
 
+	#[tracing::instrument(
+		name = "int_unique",
+		target = "solver",
+		level = "trace",
+		skip(self, ctx)
+	)]
 	fn propagate(&mut self, ctx: &mut E::PropagationCtx<'_>) -> Result<(), E::Conflict> {
+		trace!(target: "solver", num_vars = self.prop.var.len(), "propagating int_unique constraint");
 		self.prop.propagate(ctx)
 	}
 }
@@ -250,6 +284,7 @@ impl<I> IntUniqueBounds<I> {
 					k -= 1;
 				}
 
+				trace!(target: "solver", var = ?self.var[self.max_sorted[i]], hall_min, hall_max, reason = ?reason, "filtering lower bound of variable in int_unique constraint");
 				self.var[self.max_sorted[i]].tighten_min(ctx, hall_max, reason)?;
 				self.lb_cache[self.max_sorted[i]] = hall_max;
 
@@ -321,6 +356,7 @@ impl<I> IntUniqueBounds<I> {
 					k += 1;
 				}
 
+				trace!(target: "solver", var = ?self.var[self.min_sorted[i]], hall_min, hall_max, reason = ?reason, "filtering upper bound of variable in int_unique constraint");
 				self.var[self.min_sorted[i]].tighten_max(ctx, hall_min - 1, reason)?;
 				self.ub_cache[self.min_sorted[i]] = hall_min - 1;
 

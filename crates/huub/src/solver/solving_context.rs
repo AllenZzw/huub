@@ -347,17 +347,13 @@ impl<'a> SolvingContext<'a> {
 			}
 		};
 		let (lb, ub) = self.state.int_vars[iv.idx()].bounds(self);
-		let event = if lb == ub {
-			IntEvent::Fixed
-		} else {
-			event
-		};
+		let event = if lb == ub { IntEvent::Fixed } else { event };
 		self.state.propagation_queue.push_back(LitPropagation {
 			lit: lit.0,
 			reason,
 			event: Some((iv, event)),
 		});
-		
+
 		Ok(())
 	}
 
