@@ -321,7 +321,17 @@ impl<'a> SolvingContext<'a> {
 			IntLitMeaning::GreaterEq(_) => IntEvent::LowerBound,
 			IntLitMeaning::Less(_) => IntEvent::UpperBound,
 		};
-		self.propagate_lit(lit, reason, Some((iv, event)));
+		let reason = Reason::from_view(reason.build_reason(self));
+		trace!(
+			target: "solver",
+			lit = i32::from(lit.0),
+			reason = ?ReasonTracePrint(&reason),
+			prop = self.current_prop.index(),
+			"propagate"
+		);
+		let _prev = self.state.trail.assign_lit(lit.0);
+		debug_assert_eq!(_prev, None);
+		// self.propagate_lit(lit, reason, Some((iv, event)));
 		// Make the domains match.
 		match lit_req {
 			IntLitMeaning::Eq(val) => {
@@ -336,6 +346,18 @@ impl<'a> SolvingContext<'a> {
 				self.state.int_vars[iv.idx()].notify_upper_bound(&mut self.state.trail, ub - 1);
 			}
 		};
+		let (lb, ub) = self.state.int_vars[iv.idx()].bounds(self);
+		let event = if lb == ub {
+			IntEvent::Fixed
+		} else {
+			event
+		};
+		self.state.propagation_queue.push_back(LitPropagation {
+			lit: lit.0,
+			reason,
+			event: Some((iv, event)),
+		});
+		
 		Ok(())
 	}
 
