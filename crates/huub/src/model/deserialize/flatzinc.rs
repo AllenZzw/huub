@@ -52,6 +52,10 @@ pub enum AnnotationIdent {
 	BoolSearch,
 	/// "bounds" consistency annotation.
 	ConsistencyBounds,
+	/// "cumulative_slack_propagation" consistency annotation — opt-in to
+	/// the cumulative-slack skip propagator (replaces the baseline bounds
+	/// propagator). See `testing/alldiff/STRATEGIES.md`.
+	ConsistencyCumulativeSlack,
 	/// "domain" consistency annotation.
 	ConsistencyDomain,
 	/// "value_propagation" consistency annotation.
@@ -366,6 +370,7 @@ impl AnnotationIdent {
 		match self {
 			Self::BoolSearch => "bool_search",
 			Self::ConsistencyBounds => "bounds",
+			Self::ConsistencyCumulativeSlack => "cumulative_slack_propagation",
 			Self::ConsistencyDomain => "domain",
 			Self::ConsistencyValue => "value_propagation",
 			Self::DisjDetectPrec => "detectable_precedence",
@@ -404,6 +409,7 @@ impl TryFrom<&str> for AnnotationIdent {
 			"anti_first_fail" => Ok(Self::VarSelAntiFirstFail),
 			"bool_search" => Ok(Self::BoolSearch),
 			"bounds" => Ok(Self::ConsistencyBounds),
+			"cumulative_slack_propagation" => Ok(Self::ConsistencyCumulativeSlack),
 			"detectable_precedence" => Ok(Self::DisjDetectPrec),
 			"domain" => Ok(Self::ConsistencyDomain),
 			"edge_finding" => Ok(Self::DisjEdgeFinding),
@@ -1750,7 +1756,12 @@ impl<'a> FznModelBuilder<'a> {
 					};
 					let args = self.arg_array(args)?;
 					let args: Vec<_> = args.iter().map(|l| self.lit_int(l)).try_collect()?;
-					let (bounds, value) = match (
+					let cum_slack = Self::anns_contains(
+						&c.ann,
+						&mut ann_used,
+						AnnotationIdent::ConsistencyCumulativeSlack,
+					);
+					let (bounds, value, cum_slack) = match (
 						Self::anns_contains(
 							&c.ann,
 							&mut ann_used,
@@ -1761,14 +1772,18 @@ impl<'a> FznModelBuilder<'a> {
 							&mut ann_used,
 							AnnotationIdent::ConsistencyValue,
 						),
+						cum_slack,
 					) {
-						(false, false) => (None, None),
-						(bounds, value) => (Some(bounds), Some(value)),
+						(false, false, false) => (None, None, None),
+						(bounds, value, cum_slack) => {
+							(Some(bounds), Some(value), Some(cum_slack))
+						}
 					};
 					self.prb
 						.unique(args)
 						.maybe_bounds_propagation(bounds)
 						.maybe_value_propagation(value)
+						.maybe_cumulative_slack_propagation(cum_slack)
 						.post()?;
 				}
 				ConstraintIdent::ArrayIntMaximum | ConstraintIdent::ArrayIntMinimum => {
