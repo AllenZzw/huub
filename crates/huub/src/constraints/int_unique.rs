@@ -513,6 +513,7 @@ where
 		for v in &self.var {
 			v.enqueue_when(ctx, IntPropCond::Bounds);
 		}
+		ctx.advise_on_backtrack();
 	}
 
 	fn advise_of_backtrack(&mut self, _ctx: &mut E::NotificationContext<'_>) {
