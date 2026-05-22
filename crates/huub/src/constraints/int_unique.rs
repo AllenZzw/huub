@@ -80,6 +80,11 @@ pub struct IntUniqueBounds<I> {
 	hall_interval: Vec<usize>,
 	/// Hall interval bucket transitions
 	bucket: Vec<usize>,
+	// ---- Counters (Drop-emitted, parallel to IntUniqueBoundsCumulativeSlack) ----
+	prop_calls: u64,
+	prop_full: u64,
+	prop_failures: u64,
+	prop_backtracks: u64,
 }
 
 /// Value consistent propagator for the integer `unique` constraint.
@@ -391,6 +396,10 @@ impl<I> IntUniqueBounds<I> {
 			diff: vec![0; n],
 			hall_interval: vec![0; n],
 			bucket: vec![0; n],
+			prop_calls: 0,
+			prop_full: 0,
+			prop_failures: 0,
+			prop_backtracks: 0,
 		}
 	}
 
@@ -506,6 +515,10 @@ where
 		}
 	}
 
+	fn advise_of_backtrack(&mut self, _ctx: &mut E::NotificationContext<'_>) {
+		self.prop_backtracks += 1;
+	}
+
 	#[tracing::instrument(
 		name = "int_unique_bounds",
 		target = "solver",
@@ -513,10 +526,38 @@ where
 		skip(self, ctx)
 	)]
 	fn propagate(&mut self, ctx: &mut E::PropagationContext<'_>) -> Result<(), E::Conflict> {
+		self.prop_calls += 1;
+		self.prop_full += 1;
 		self.sort(ctx);
-		self.filter_lower(ctx)?;
-		self.filter_upper(ctx)?;
+		if let Err(c) = self.filter_lower(ctx) {
+			self.prop_failures += 1;
+			return Err(c);
+		}
+		if let Err(c) = self.filter_upper(ctx) {
+			self.prop_failures += 1;
+			return Err(c);
+		}
 		Ok(())
+	}
+}
+
+impl<I> Drop for IntUniqueBounds<I> {
+	fn drop(&mut self) {
+		if self.prop_calls > 0 {
+			info!(
+				target: "int_unique_stats",
+				n = self.var.len(),
+				calls = self.prop_calls,
+				full = self.prop_full,
+				skips = 0u64,
+				pushes = 0u64,
+				failures = self.prop_failures,
+				check_failures = 0u64,
+				backtracks = self.prop_backtracks,
+				skip_rate = 0.0f64,
+				"IntUniqueBounds stats"
+			);
+		}
 	}
 }
 
