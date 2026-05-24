@@ -143,6 +143,16 @@ pub struct Model {
 	pub(crate) diff_logic: diff_logic::DifferenceLogicCollection,
 }
 
+impl Model {
+	/// Follow any aliasing chain on the given integer view, returning a
+	/// view that no longer references aliases. Useful after
+	/// [`diff_logic::simplify_unify`] has collapsed equivalent variables
+	/// onto a single representative.
+	pub fn resolve_alias(&self, view: View<IntVal>) -> View<IntVal> {
+		view.resolve_alias(self).into_inner()
+	}
+}
+
 impl AdvRef {
 	/// Recreate the advisor reference from a raw value.
 	pub(crate) fn from_raw(raw: u32) -> Self {

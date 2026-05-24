@@ -25,24 +25,20 @@
 //!
 //! ## Known limitations (fixed alongside `tighten_difference`)
 //!
-//! - **Late-endpoint advisor-subscription gap.** The bounds shell's
-//!   `initialize` fires once, at the moment the first edge auto-posts the
-//!   shell. Only endpoints already in `state.diff_logic.int_vars` at that
-//!   instant get a bounds advisor. Any endpoint introduced by a *later*
-//!   [`crate::solver::Solver::add_diff_logic_edge`] call is interned in the
-//!   graph but is never wired to wake the shell on bound changes. The
-//!   propagator stays correct (it cannot prove false), but it becomes
-//!   incomplete for workloads where mid-search SAT decisions tighten the
-//!   late-interned endpoint's bounds. The fix is a
-//!   `subscribe_int_bounds_advisor` helper on [`crate::solver::Solver`] (~15
-//!   lines) plus a lowering-time pre-pass that interns every endpoint and posts
-//!   the shell before any edge registration. Both pieces are also prerequisites
-//!   for mid-search `tighten_difference`, so they land together.
-//! - **No mid-search endpoint introduction.** Same root cause as above: the
-//!   shell carries no protocol to subscribe new advisors after `initialize`.
-//!   Once `tighten_difference` exists, the same `subscribe_int_bounds_advisor`
-//!   helper handles the case where the asserted difference's endpoints were not
-//!   previously in the graph.
+//! - **No mid-search endpoint introduction.** The bounds shell's `initialize`
+//!   fires once, when the first [`crate::solver::Solver::add_diff_logic_edge`]
+//!   auto-posts the shell. Lowering pre-interns every endpoint via
+//!   [`crate::solver::Solver::intern_diff_logic_int`] /
+//!   [`crate::solver::Solver::intern_diff_logic_bool`] before any edge is
+//!   registered, so every lowering-time endpoint gets an advisor. But
+//!   `tighten_difference` (future work) would assert a brand-new `x − y ≤ d`
+//!   mid-search — possibly with endpoints not previously in the graph. Those
+//!   late endpoints would be interned by `register_edge` but would have no
+//!   bounds advisor, so subsequent bound changes on them would not wake the
+//!   shell. The fix is a `subscribe_int_bounds_advisor` helper on
+//!   [`crate::solver::Solver`] (~15 lines) that synthesizes the advisor entry
+//!   without needing an `InitializationContext`; it lands together with
+//!   `tighten_difference`.
 
 use std::{cmp::Reverse, mem};
 
@@ -1072,10 +1068,12 @@ impl Propagator<Engine> for DifferenceLogicBoundsShell {
 			.priority_bounds
 			.unwrap_or(PriorityLevel::Medium);
 		ctx.set_priority(prio);
-		// Subscribe a bounds advisor on every integer endpoint already in
-		// the graph. Endpoints introduced by mid-search edge registration
-		// would not be picked up; that capability arrives with
-		// `tighten_difference` in a later PR.
+		// Subscribe a bounds advisor on every integer endpoint in the
+		// graph. Lowering pre-interns all endpoints via
+		// `Solver::intern_diff_logic_int` before the first edge auto-posts
+		// the shell, so every lowering-time endpoint is reachable here.
+		// Mid-search endpoints (introduced later by `tighten_difference`)
+		// would require a separate subscription path.
 		let int_vars: Vec<View<IntVal>> = ctx.state.diff_logic.int_vars.clone();
 		for (i, n) in int_vars.iter().enumerate() {
 			n.advise_when(ctx, IntPropCond::Bounds, i as u64);

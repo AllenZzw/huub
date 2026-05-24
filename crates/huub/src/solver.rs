@@ -1033,6 +1033,33 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 	///
 	/// `gate` is reserved for the planned boolean-gated implication support
 	/// and must be `None` in this build; passing `Some(_)` panics.
+	/// Intern an integer endpoint into the engine-resident diff-logic
+	/// graph without registering an edge. Must be called for every
+	/// endpoint that will appear in a subsequent
+	/// [`Self::add_diff_logic_edge`] call so the per-node trailed lists
+	/// and algorithm buffers exist before the shell's `initialize`
+	/// subscribes advisors.
+	pub(crate) fn intern_diff_logic_int(&mut self, view: View<IntVal>) {
+		let mut handle = self.engine.borrow_mut();
+		let engine = &mut *handle;
+		let _ = engine
+			.state
+			.diff_logic
+			.intern_int(&mut engine.state.trail, view);
+	}
+
+	/// Intern a gating Boolean into the engine-resident diff-logic graph
+	/// without registering an edge. Same rationale as
+	/// [`Self::intern_diff_logic_int`].
+	pub(crate) fn intern_diff_logic_bool(&mut self, view: View<bool>) {
+		let mut handle = self.engine.borrow_mut();
+		let engine = &mut *handle;
+		let _ = engine
+			.state
+			.diff_logic
+			.intern_bool(&mut engine.state.trail, view);
+	}
+
 	pub(crate) fn add_diff_logic_edge(
 		&mut self,
 		x: View<IntVal>,

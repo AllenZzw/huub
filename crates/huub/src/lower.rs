@@ -392,6 +392,30 @@ impl LowererComplete<&mut Model> {
 
 		model.propagate()?;
 
+		// Diff-logic expansion runs BEFORE LoweringMap construction:
+		// `expand_collection` allocates fresh model Booleans (for
+		// NotEquals / ImpliedNotEquals / ReifiedEquals) and posts CNF
+		// clauses onto `model.constraints`. Those fresh vars must be
+		// present in `model.bool_vars` when the map is sized, and the
+		// posted clauses must be visible to the per-constraint loop.
+		// Simplification (cycle detection, Johnson pruning, unification)
+		// runs here too so any equality-cycle `unify` calls land before
+		// alias-using code (constraint lowering, eager-encoding analysis)
+		// looks at variable identity.
+		let diff_logic_edges = if !model.diff_logic.is_empty() {
+			let raw = model.diff_logic.take_constraints();
+			let edges =
+				model::diff_logic::expand_collection(model, raw).map_err(LoweringError::from)?;
+			let edges = model::diff_logic::simplify_cycle_detection(model, edges)
+				.map_err(LoweringError::from)?;
+			let edges = model::diff_logic::simplify_johnson_pruning(model, edges);
+			let edges =
+				model::diff_logic::simplify_unify(model, edges).map_err(LoweringError::from)?;
+			Some(edges)
+		} else {
+			None
+		};
+
 		// Determine encoding types for integer variables
 		let mut int_eager_direct = FxHashSet::<Resolved<model::Decision<IntVal>>>::default();
 		let int_eager_order = FxHashSet::<Resolved<model::Decision<IntVal>>>::default();
@@ -472,17 +496,28 @@ impl LowererComplete<&mut Model> {
 		}
 		drop(ctx);
 
-		// Diff-logic pipeline: drain the model-level collection, expand
-		// the syntactic variants into raw edges, run model-stage
-		// simplification (Slice 1 negative-cycle check today; Slices 3
-		// and 4 land in later PRs), then register every surviving edge
-		// on the engine-resident graph via `Solver::add_diff_logic_edge`.
-		if !model.diff_logic.is_empty() {
-			let raw = model.diff_logic.take_constraints();
-			let edges = model::diff_logic::expand_collection(model, raw);
-			let edges = model::diff_logic::simplify_cycle_detection(model, edges)
-				.map_err(LoweringError::from)?;
-			let edges = model::diff_logic::simplify_johnson_pruning(model, edges);
+		// Post the surviving diff-logic edges to the engine. By this
+		// point the LoweringMap is built (so `map.get` resolves model
+		// views to solver views) and every per-constraint `to_solver`
+		// has run.
+		//
+		// Two passes:
+		// 1. Pre-intern every endpoint (int + bool) so the engine's diff-logic graph
+		//    already knows about it when the first edge auto-registers the propagator
+		//    shells. Without this, later-interned endpoints would never get advisors
+		//    (the shells' `initialize` only fires once).
+		// 2. Register the edges themselves.
+		if let Some(edges) = diff_logic_edges {
+			for edge in &edges {
+				let xv = map.get(&mut slv, edge.x);
+				let yv = map.get(&mut slv, edge.y);
+				slv.intern_diff_logic_int(xv);
+				slv.intern_diff_logic_int(yv);
+				if let Some(g) = edge.gate {
+					let gv = map.get(&mut slv, g);
+					slv.intern_diff_logic_bool(gv);
+				}
+			}
 			for edge in edges {
 				let xv = map.get(&mut slv, edge.x);
 				let yv = map.get(&mut slv, edge.y);

@@ -9,16 +9,17 @@
 //!
 //! ## PR scope
 //!
-//! Ships the `Global`, `Implied`, and `Reified` variants of
-//! [`DifferenceLogicConstraint`], plus **Slice 1** (Bellman-Ford cycle
-//! detection) and **Slice 3** (Johnson's all-pairs redundant-edge
-//! pruning). NotEquals / ImpliedEquals / ReifiedEquals expansions and
-//! **Slice 4** (equality-cycle unification) land in a subsequent PR.
+//! Ships all seven [`DifferenceLogicConstraint`] variants and Slices 1,
+//! 3, and 4 of model-stage simplification: Bellman-Ford cycle detection,
+//! Johnson's all-pairs redundant-edge pruning, and equality-cycle
+//! unification (via [`crate::actions::IntSimplificationActions::unify`]).
 
+use pindakaas::propositional_logic::Formula;
 use rustc_hash::FxHashMap;
 
 use crate::{
 	IntVal,
+	actions::IntSimplificationActions,
 	constraints::{Conflict, Reason},
 	model::{Model, View},
 };
@@ -32,6 +33,14 @@ pub enum DifferenceLogicConstraint {
 	Implied(View<bool>, View<IntVal>, View<IntVal>, IntVal),
 	/// A reified difference constraint `b ↔ (x − y ≤ d)`.
 	Reified(View<bool>, View<IntVal>, View<IntVal>, IntVal),
+	/// An implied equality `b → (x − y == d)`.
+	ImpliedEquals(View<bool>, View<IntVal>, View<IntVal>, IntVal),
+	/// A disequality `x − y ≠ d`.
+	NotEquals(View<IntVal>, View<IntVal>, IntVal),
+	/// An implied disequality `b → (x − y ≠ d)`.
+	ImpliedNotEquals(View<bool>, View<IntVal>, View<IntVal>, IntVal),
+	/// A reified equality `b ↔ (x − y == d)`.
+	ReifiedEquals(View<bool>, View<IntVal>, View<IntVal>, IntVal),
 }
 
 /// User-tunable knobs for difference-logic processing.
@@ -48,7 +57,7 @@ pub struct DifferenceLogicParameters {
 impl Default for DifferenceLogicParameters {
 	fn default() -> Self {
 		Self {
-			level: 1,
+			level: 3,
 			simplify: true,
 		}
 	}
@@ -90,9 +99,19 @@ impl DifferenceLogicCollection {
 	/// level rejects this variant.
 	pub fn add(&mut self, constraint: DifferenceLogicConstraint) -> bool {
 		let accept = match constraint {
+			// Level 1+: globally-active edges and gated edges that don't
+			// need fresh model booleans to lower.
 			DifferenceLogicConstraint::Global(_, _, _)
 			| DifferenceLogicConstraint::Implied(_, _, _, _)
 			| DifferenceLogicConstraint::Reified(_, _, _, _) => self.parameters.level >= 1,
+			// Level 2+: equality constraints that expand into two gated
+			// edges using the existing implication boolean.
+			DifferenceLogicConstraint::ImpliedEquals(_, _, _, _) => self.parameters.level >= 2,
+			// Level 3+: disequality constraints that need fresh model
+			// booleans plus CNF clauses to encode the disjunction.
+			DifferenceLogicConstraint::NotEquals(_, _, _)
+			| DifferenceLogicConstraint::ImpliedNotEquals(_, _, _, _)
+			| DifferenceLogicConstraint::ReifiedEquals(_, _, _, _) => self.parameters.level >= 3,
 		};
 		if accept {
 			self.raw_constraints.push(constraint);
@@ -122,17 +141,31 @@ pub struct DiffEdge {
 	pub gate: Option<View<bool>>,
 }
 
-/// Expand the syntactic constraints into flat edges.
+/// Expand the syntactic constraints into flat edges, allocating fresh
+/// model Booleans and posting CNF disjunctions as needed for the
+/// disequality variants.
 ///
-/// `Global` maps to one gateless edge; `Implied(b, x, y, d)` maps to one
-/// edge gated by `b`; `Reified(b, x, y, d)` expands to two edges that
-/// together encode the biconditional `b ↔ (x − y ≤ d)`:
-/// - `b → (x − y ≤ d)` and
-/// - `¬b → (y − x ≤ −d − 1)`, i.e. `¬b → (x − y > d)`.
+/// Mapping (each `(x, y, d)` denotes `x − y ≤ d`):
+///
+/// - `Global`: one gateless edge.
+/// - `Implied(b, x, y, d)`: one edge gated by `b`.
+/// - `Reified(b, x, y, d)`: two edges encoding `b ↔ (x − y ≤ d)` via `b → (x −
+///   y ≤ d)` and `¬b → (y − x ≤ −d − 1)`.
+/// - `ImpliedEquals(b, x, y, d)`: `b → (x − y == d)` → two edges `b → (x − y ≤
+///   d)` and `b → (y − x ≤ −d)`.
+/// - `NotEquals(x, y, d)`: pick a fresh `c`. Post nothing extra; the two gated
+///   edges `c → (x − y ≤ d − 1)` and `¬c → (y − x ≤ −d − 1)` together force `(x
+///   − y ≠ d)`.
+/// - `ImpliedNotEquals(b, x, y, d)`: pick fresh `c1`, `c2`. Post `b → (c1 ∨
+///   c2)` and `(¬c1 ∨ ¬c2)`, plus the gated edges `c1 → (x − y ≤ d − 1)` and
+///   `c2 → (y − x ≤ −d − 1)`.
+/// - `ReifiedEquals(b, x, y, d)`: `b → (x − y == d)` plus `¬b → (x − y ≠ d)`.
+///   The first half is two edges (mirror of `ImpliedEquals`); the second half
+///   is an `ImpliedNotEquals(¬b, ...)` expansion.
 pub(crate) fn expand_collection(
-	_model: &mut Model,
+	model: &mut Model,
 	raw: Vec<DifferenceLogicConstraint>,
-) -> Vec<DiffEdge> {
+) -> Result<Vec<DiffEdge>, Conflict<View<bool>>> {
 	let mut out = Vec::with_capacity(raw.len());
 	for c in raw {
 		match c {
@@ -166,9 +199,97 @@ pub(crate) fn expand_collection(
 					gate: Some(!b),
 				});
 			}
+			DifferenceLogicConstraint::ImpliedEquals(b, x, y, d) => {
+				out.push(DiffEdge {
+					x,
+					y,
+					d,
+					gate: Some(b),
+				});
+				out.push(DiffEdge {
+					x: y,
+					y: x,
+					d: -d,
+					gate: Some(b),
+				});
+			}
+			DifferenceLogicConstraint::NotEquals(x, y, d) => {
+				let c = model.new_bool_decision();
+				out.push(DiffEdge {
+					x,
+					y,
+					d: d - 1,
+					gate: Some(c),
+				});
+				out.push(DiffEdge {
+					x: y,
+					y: x,
+					d: -d - 1,
+					gate: Some(!c),
+				});
+			}
+			DifferenceLogicConstraint::ImpliedNotEquals(b, x, y, d) => {
+				expand_implied_not_equals(model, &mut out, b, x, y, d)?;
+			}
+			DifferenceLogicConstraint::ReifiedEquals(b, x, y, d) => {
+				// b → (x − y == d): two gated edges.
+				out.push(DiffEdge {
+					x,
+					y,
+					d,
+					gate: Some(b),
+				});
+				out.push(DiffEdge {
+					x: y,
+					y: x,
+					d: -d,
+					gate: Some(b),
+				});
+				// ¬b → (x − y ≠ d): an implied disequality.
+				expand_implied_not_equals(model, &mut out, !b, x, y, d)?;
+			}
 		}
 	}
-	out
+	Ok(out)
+}
+
+/// Lower `b → (x − y ≠ d)` into two gated edges plus the CNF disjunction
+/// that links them. Allocates two fresh Booleans `c1`, `c2`.
+fn expand_implied_not_equals(
+	model: &mut Model,
+	edges: &mut Vec<DiffEdge>,
+	b: View<bool>,
+	x: View<IntVal>,
+	y: View<IntVal>,
+	d: IntVal,
+) -> Result<(), Conflict<View<bool>>> {
+	let c1 = model.new_bool_decision();
+	let c2 = model.new_bool_decision();
+	// b → (c1 ∨ c2)  ≡  (¬b ∨ c1 ∨ c2)
+	model
+		.proposition(Formula::Or(vec![
+			Formula::from(!b),
+			Formula::from(c1),
+			Formula::from(c2),
+		]))
+		.post()?;
+	// At most one fires: (¬c1 ∨ ¬c2)
+	model
+		.proposition(Formula::Or(vec![Formula::from(!c1), Formula::from(!c2)]))
+		.post()?;
+	edges.push(DiffEdge {
+		x,
+		y,
+		d: d - 1,
+		gate: Some(c1),
+	});
+	edges.push(DiffEdge {
+		x: y,
+		y: x,
+		d: -d - 1,
+		gate: Some(c2),
+	});
+	Ok(())
 }
 
 /// Slice 1: detect a negative cycle in the globally active subgraph via
@@ -381,6 +502,133 @@ pub(crate) fn simplify_johnson_pruning(model: &Model, edges: Vec<DiffEdge>) -> V
 		.collect()
 }
 
+/// Slice 4: equality-cycle unification.
+///
+/// After Bellman-Ford + Johnson's all-pairs have populated `dist`, every
+/// pair `(u, v)` with `dist[u][v] + dist[v][u] == 0` is forced into the
+/// equality `u − v == dist[u][v]`. Call
+/// [`IntSimplificationActions::unify`] on the model so subsequent
+/// reasoning treats them as one variable plus an offset.
+///
+/// Unification is destructive — once it fires, the original views
+/// resolve to the canonical representative + offset. Callers that hold
+/// the original view should re-resolve through [`Model::resolve_alias`]
+/// before reading it again.
+///
+/// Returns the surviving edges (no edges are dropped here; pruning is
+/// Slice 3's job). Errors propagate as the model's conflict type.
+pub(crate) fn simplify_unify(
+	model: &mut Model,
+	edges: Vec<DiffEdge>,
+) -> Result<Vec<DiffEdge>, Conflict<View<bool>>> {
+	if !model.diff_logic.parameters.simplify {
+		return Ok(edges);
+	}
+
+	// Intern endpoints and build the globally-active subgraph.
+	let mut node_of: FxHashMap<View<IntVal>, usize> = FxHashMap::default();
+	let mut int_vars: Vec<View<IntVal>> = Vec::new();
+	for e in &edges {
+		for endpoint in [e.x, e.y] {
+			if let std::collections::hash_map::Entry::Vacant(entry) = node_of.entry(endpoint) {
+				int_vars.push(endpoint);
+				let _ = entry.insert(int_vars.len() - 1);
+			}
+		}
+	}
+	let n = int_vars.len();
+	if n < 2 {
+		return Ok(edges);
+	}
+
+	let mut active_out: Vec<Vec<usize>> = vec![Vec::new(); n];
+	for (idx, edge) in edges.iter().enumerate() {
+		if edge.gate.is_some() {
+			continue;
+		}
+		let from = node_of[&edge.x];
+		active_out[from].push(idx);
+	}
+
+	// Bellman-Ford to populate `pi`.
+	let mut pi: Vec<IntVal> = vec![0; n];
+	let mut changed = true;
+	for _ in 0..n {
+		changed = false;
+		for adj in &active_out {
+			for &e_idx in adj {
+				let edge = &edges[e_idx];
+				let from = node_of[&edge.x];
+				let to = node_of[&edge.y];
+				let cand = pi[from].saturating_add(edge.d);
+				if cand < pi[to] {
+					pi[to] = cand;
+					changed = true;
+				}
+			}
+		}
+		if !changed {
+			break;
+		}
+	}
+	if changed {
+		// Negative cycle (Slice 1 should have caught it). Skip unification.
+		return Ok(edges);
+	}
+
+	// Johnson's all-pairs distance matrix (same pattern as Slice 3).
+	let mut dist: Vec<Vec<IntVal>> = vec![vec![IntVal::MAX; n]; n];
+	for src in 0..n {
+		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
+		dist_src[src] = 0;
+		let mut queue: crate::helpers::priority_queue::LazyPriorityQueue<
+			usize,
+			std::cmp::Reverse<IntVal>,
+		> = crate::helpers::priority_queue::LazyPriorityQueue::new();
+		let _ = queue.push(src, std::cmp::Reverse(0));
+		while let Some((u, std::cmp::Reverse(d_u))) = queue.pop() {
+			if d_u > dist_src[u] {
+				continue;
+			}
+			for &e_idx in &active_out[u] {
+				let edge = &edges[e_idx];
+				let v = node_of[&edge.y];
+				let reduced_w = pi[u].saturating_add(edge.d).saturating_sub(pi[v]);
+				let alt = d_u.saturating_add(reduced_w);
+				if alt < dist_src[v] {
+					dist_src[v] = alt;
+					let _ = queue.push_increase(v, std::cmp::Reverse(alt));
+				}
+			}
+		}
+		for dst in 0..n {
+			if dist_src[dst] != IntVal::MAX {
+				dist[src][dst] = dist_src[dst]
+					.saturating_add(pi[dst])
+					.saturating_sub(pi[src]);
+			}
+		}
+	}
+
+	// Walk every ordered pair; for each equality cycle, call unify.
+	for u in 0..n {
+		for v in (u + 1)..n {
+			if dist[u][v] == IntVal::MAX || dist[v][u] == IntVal::MAX {
+				continue;
+			}
+			if dist[u][v].saturating_add(dist[v][u]) != 0 {
+				continue;
+			}
+			// u − v == dist[u][v] exactly.
+			let offset = dist[u][v];
+			let u_view = int_vars[u];
+			let v_view = int_vars[v];
+			u_view.unify(model, v_view + offset)?;
+		}
+	}
+	Ok(edges)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -522,6 +770,148 @@ mod tests {
 		let (vx, vy, vb) = captured.unwrap();
 		assert!(!vb);
 		assert!(vx > vy, "with b=false, x={vx} ≤ y={vy} violates ¬b ⇒ x > y");
+	}
+
+	#[test]
+	fn not_equals_forbids_exact_difference() {
+		use crate::{
+			actions::IntDecisionActions,
+			solver::{Solver, Status, Valuation},
+		};
+
+		// x − y ≠ 2. Pin y = 1 → x must avoid 3.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=4);
+		let y = model.new_int_decision(0..=4);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::NotEquals(x, y, 2))
+		);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		// Pin y = 1.
+		let y_eq_1 = sy.lit(&mut slv, crate::solver::IntLitMeaning::Eq(1));
+		slv.add_clause([y_eq_1]).unwrap();
+
+		// Enumerate every solution; none should have x − y == 2 (i.e. x == 3).
+		let mut count = 0usize;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				let vx = sx.val(sol);
+				let vy = sy.val(sol);
+				assert_eq!(vy, 1);
+				assert_ne!(
+					vx - vy,
+					2,
+					"NotEquals(x, y, 2) violated at (x={vx}, y={vy})"
+				);
+				count += 1;
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		assert!(count >= 1);
+	}
+
+	#[test]
+	fn implied_equals_propagates_when_gate_true() {
+		use crate::solver::{Solver, Status, Valuation};
+
+		// b → (x − y == 2). With b forced true, every solution has x = y + 2.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let b = model.new_bool_decision();
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::ImpliedEquals(b, x, y, 2))
+		);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		let sb = map.get(&mut slv, b);
+		slv.add_clause([sb]).unwrap();
+
+		let mut captured = None;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				captured = Some((sx.val(sol), sy.val(sol)));
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		let (vx, vy) = captured.unwrap();
+		assert_eq!(vx - vy, 2, "b=true should force x − y == 2");
+	}
+
+	#[test]
+	fn reified_equals_negative_side_propagates() {
+		use crate::solver::{Solver, Status, Valuation};
+
+		// b ↔ (x − y == 0). With b forced false, every solution has x ≠ y.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=3);
+		let y = model.new_int_decision(0..=3);
+		let b = model.new_bool_decision();
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::ReifiedEquals(b, x, y, 0))
+		);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		let sb = map.get(&mut slv, b);
+		slv.add_clause([!sb]).unwrap();
+
+		let mut captured = None;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				captured = Some((sx.val(sol), sy.val(sol)));
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		let (vx, vy) = captured.unwrap();
+		assert_ne!(vx, vy, "b=false should force x ≠ y");
+	}
+
+	#[test]
+	fn equality_cycle_unifies_views() {
+		// x − y ≤ 0 AND y − x ≤ 0 → x == y. Slice 4 should call unify;
+		// the model's alias chain then collapses one view onto the other.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=5);
+		let y = model.new_int_decision(0..=5);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(x, y, 0))
+		);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(y, x, 0))
+		);
+
+		// Lower; this triggers expand → cycle → johnson → unify.
+		use crate::solver::Solver;
+		let _: (Solver, _) = model.clone().lower().to_solver().unwrap();
+
+		// After lowering, x and y should resolve to the same canonical
+		// view (modulo a possible offset of zero in this case).
+		let mut model2 = model.clone();
+		// Re-run lowering on `model2` so the alias is installed there.
+		let _: (Solver, _) = model2.lower().to_solver().unwrap();
+		let rx = model2.resolve_alias(x);
+		let ry = model2.resolve_alias(y);
+		assert_eq!(rx, ry, "equality cycle should unify x and y");
 	}
 
 	#[test]
