@@ -30,6 +30,7 @@ macro_rules! trace_new_lit {
 }
 
 pub(crate) mod advisor;
+pub(crate) mod diff_logic;
 pub(crate) mod prop_ref;
 pub(crate) mod propagation;
 pub(crate) mod state;

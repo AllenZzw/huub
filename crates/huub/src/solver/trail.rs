@@ -9,7 +9,7 @@ use pindakaas::{Lit as RawLit, Var as RawVar};
 use tracing::trace;
 
 use crate::{
-	actions::{Trailed, TrailingActions},
+	actions::{ConstructionActions, Trailed, TrailingActions},
 	helpers::bytes::Bytes,
 };
 
@@ -320,6 +320,12 @@ impl Default for Trail {
 			int_value: vec![0_u64.to_bytes()],
 			sat_store: Vec::new(),
 		}
+	}
+}
+
+impl ConstructionActions for Trail {
+	fn new_trailed<T: Bytes>(&mut self, init: T) -> Trailed<T> {
+		self.track(init)
 	}
 }
 

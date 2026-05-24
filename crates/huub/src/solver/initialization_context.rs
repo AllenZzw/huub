@@ -29,7 +29,7 @@ use crate::{
 #[derive(Debug)]
 pub struct InitializationContext<'a> {
 	/// State object of the solver.
-	state: &'a mut State,
+	pub(crate) state: &'a mut State,
 	/// Internal propagator reference used to add propagator to activations
 	/// lists.
 	prop: PropRef,

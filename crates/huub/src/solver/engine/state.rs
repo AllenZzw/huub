@@ -16,7 +16,7 @@ use crate::{
 		activation_list::ActivationList,
 		bool_to_int::BoolToIntMap,
 		decision::{Decision, integer::IntDecision},
-		engine::{AdvisorDef, Engine, LitPropagation, PropRef},
+		engine::{AdvisorDef, Engine, LitPropagation, PropRef, diff_logic::DiffLogicState},
 		queue::PropagatorQueue,
 		trail::Trail,
 	},
@@ -103,6 +103,12 @@ pub struct State {
 	/// Last literal propagated by the Engine.
 	pub(crate) last_propagated:
 		Option<(RawLit, Option<(Decision<IntVal>, crate::actions::IntEvent)>)>,
+
+	// ---- Difference logic state (engine-resident) ----
+	/// Engine-resident difference logic graph. Empty when no diff-logic
+	/// edges have been registered; populated by
+	/// [`crate::solver::Solver::add_diff_logic_edge`] at lowering time.
+	pub(crate) diff_logic: DiffLogicState,
 
 	// ---- Debugging Helpers ----
 	/// List of integer variables that have been notified as fixed, but should

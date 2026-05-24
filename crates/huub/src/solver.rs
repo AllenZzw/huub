@@ -1028,6 +1028,43 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		self.add_clause(clause)
 	}
 
+	/// Register a difference logic edge `x − y ≤ d` on the engine-resident
+	/// graph and auto-post the bounds shell on the first edge.
+	///
+	/// `gate` is reserved for the planned boolean-gated implication support
+	/// and must be `None` in this build; passing `Some(_)` panics.
+	pub(crate) fn add_diff_logic_edge(
+		&mut self,
+		x: View<IntVal>,
+		y: View<IntVal>,
+		d: IntVal,
+		gate: Option<View<bool>>,
+	) {
+		use crate::solver::engine::diff_logic::DifferenceLogicBoundsShell;
+
+		let mut needs_register = false;
+		{
+			let mut handle = self.engine.borrow_mut();
+			let engine = &mut *handle;
+			engine
+				.state
+				.diff_logic
+				.register_edge(&mut engine.state.trail, x, y, d, gate);
+			if !engine.state.diff_logic.propagators_registered {
+				engine.state.diff_logic.propagators_registered = true;
+				needs_register = true;
+			}
+		}
+		if needs_register {
+			self.add_propagator(Box::new(DifferenceLogicBoundsShell), true);
+			let prop_ref = {
+				let engine = self.engine.borrow();
+				PropRef::new(engine.propagators.len() - 1)
+			};
+			self.engine.borrow_mut().state.diff_logic.bounds_ref = Some(prop_ref);
+		}
+	}
+
 	/// Add a constraint propagator to the solver to enforce a constraint.
 	pub(crate) fn add_propagator(&mut self, propagator: BoxedPropagator, from_model: bool) {
 		let mut handle = self.engine.borrow_mut();

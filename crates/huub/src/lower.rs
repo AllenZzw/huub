@@ -470,6 +470,25 @@ impl LowererComplete<&mut Model> {
 		for c in model.constraints.iter().flatten() {
 			c.to_solver(&mut ctx)?;
 		}
+		drop(ctx);
+
+		// Diff-logic pipeline: drain the model-level collection, expand
+		// the syntactic variants into raw edges, run model-stage
+		// simplification (Slice 1 negative-cycle check today; Slices 3
+		// and 4 land in later PRs), then register every surviving edge
+		// on the engine-resident graph via `Solver::add_diff_logic_edge`.
+		if !model.diff_logic.is_empty() {
+			let raw = model.diff_logic.take_constraints();
+			let edges = model::diff_logic::expand_collection(model, raw);
+			let edges = model::diff_logic::simplify_cycle_detection(model, edges)
+				.map_err(LoweringError::from)?;
+			for edge in edges {
+				let xv = map.get(&mut slv, edge.x);
+				let yv = map.get(&mut slv, edge.y);
+				let gate = edge.gate.map(|g| map.get(&mut slv, g));
+				slv.add_diff_logic_edge(xv, yv, edge.d, gate);
+			}
+		}
 
 		Ok((slv, map))
 	}

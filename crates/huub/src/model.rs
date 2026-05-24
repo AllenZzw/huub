@@ -3,6 +3,7 @@
 
 pub(crate) mod decision;
 pub mod deserialize;
+pub mod diff_logic;
 pub mod expressions;
 mod initilization_context;
 pub(crate) mod resolved;
@@ -135,6 +136,11 @@ pub struct Model {
 
 	/// Definitions of the advisors that are listening to selected changes.
 	advisors: Vec<Advisor>,
+
+	/// Collection of raw difference logic constraints. Populated via
+	/// [`diff_logic::DifferenceLogicCollection::add`] and drained at
+	/// lowering time by the pipeline in [`crate::lower`].
+	pub(crate) diff_logic: diff_logic::DifferenceLogicCollection,
 }
 
 impl AdvRef {
