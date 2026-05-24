@@ -9,10 +9,11 @@
 //!
 //! ## PR scope
 //!
-//! This file ships only the **Global** variant of
-//! [`DifferenceLogicConstraint`] and **Slice 1** simplification (cycle
-//! detection). Implied/Reified expansions, Johnson's pruning (Slice 3),
-//! and equality unification (Slice 4) land in subsequent PRs.
+//! Ships the `Global`, `Implied`, and `Reified` variants of
+//! [`DifferenceLogicConstraint`], plus **Slice 1** (Bellman-Ford cycle
+//! detection) and **Slice 3** (Johnson's all-pairs redundant-edge
+//! pruning). NotEquals / ImpliedEquals / ReifiedEquals expansions and
+//! **Slice 4** (equality-cycle unification) land in a subsequent PR.
 
 use rustc_hash::FxHashMap;
 
@@ -23,15 +24,14 @@ use crate::{
 };
 
 /// The syntactic variants of a difference constraint.
-///
-/// Only the [`Self::Global`] form is accepted in this PR; the remaining
-/// variants are present in the enum so the wider plan keeps a stable
-/// shape for subsequent PRs but are rejected by
-/// [`DifferenceLogicCollection::add`] at the current level.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum DifferenceLogicConstraint {
 	/// A globally active difference constraint `x − y ≤ d`.
 	Global(View<IntVal>, View<IntVal>, IntVal),
+	/// An implied difference constraint `b → (x − y ≤ d)`.
+	Implied(View<bool>, View<IntVal>, View<IntVal>, IntVal),
+	/// A reified difference constraint `b ↔ (x − y ≤ d)`.
+	Reified(View<bool>, View<IntVal>, View<IntVal>, IntVal),
 }
 
 /// User-tunable knobs for difference-logic processing.
@@ -90,7 +90,9 @@ impl DifferenceLogicCollection {
 	/// level rejects this variant.
 	pub fn add(&mut self, constraint: DifferenceLogicConstraint) -> bool {
 		let accept = match constraint {
-			DifferenceLogicConstraint::Global(_, _, _) => self.parameters.level >= 1,
+			DifferenceLogicConstraint::Global(_, _, _)
+			| DifferenceLogicConstraint::Implied(_, _, _, _)
+			| DifferenceLogicConstraint::Reified(_, _, _, _) => self.parameters.level >= 1,
 		};
 		if accept {
 			self.raw_constraints.push(constraint);
@@ -120,10 +122,13 @@ pub struct DiffEdge {
 	pub gate: Option<View<bool>>,
 }
 
-/// Expand the syntactic constraints into flat edges. For the Global
-/// variant this is a 1:1 mapping; more complex variants (Reified,
-/// NotEquals, ...) introduce auxiliary boolean variables and lower into
-/// multiple edges.
+/// Expand the syntactic constraints into flat edges.
+///
+/// `Global` maps to one gateless edge; `Implied(b, x, y, d)` maps to one
+/// edge gated by `b`; `Reified(b, x, y, d)` expands to two edges that
+/// together encode the biconditional `b ↔ (x − y ≤ d)`:
+/// - `b → (x − y ≤ d)` and
+/// - `¬b → (y − x ≤ −d − 1)`, i.e. `¬b → (x − y > d)`.
 pub(crate) fn expand_collection(
 	_model: &mut Model,
 	raw: Vec<DifferenceLogicConstraint>,
@@ -137,6 +142,28 @@ pub(crate) fn expand_collection(
 					y,
 					d,
 					gate: None,
+				});
+			}
+			DifferenceLogicConstraint::Implied(b, x, y, d) => {
+				out.push(DiffEdge {
+					x,
+					y,
+					d,
+					gate: Some(b),
+				});
+			}
+			DifferenceLogicConstraint::Reified(b, x, y, d) => {
+				out.push(DiffEdge {
+					x,
+					y,
+					d,
+					gate: Some(b),
+				});
+				out.push(DiffEdge {
+					x: y,
+					y: x,
+					d: -d - 1,
+					gate: Some(!b),
 				});
 			}
 		}
@@ -216,6 +243,144 @@ pub(crate) fn simplify_cycle_detection(
 	Ok(edges)
 }
 
+/// Slice 3: Johnson's all-pairs shortest paths + redundant-edge pruning.
+///
+/// After Slice 1 has populated `pi` and ruled out negative cycles, run
+/// Dijkstra reweighted by `pi` from every node to compute the full
+/// shortest-path matrix over the globally-active subgraph. Then:
+///
+/// - For a globally-active edge `(x, y, d)` with `dist[x][y] < d`, the edge is
+///   redundant — a strictly shorter path exists without it. Drop it.
+/// - For a gated edge `b → (x − y ≤ d)`:
+///   - If `dist[y][x] < −d`, the reverse path forces `x − y > d`, so the gate
+///     can never fire. The edge is dropped from the output unchanged; a future
+///     PR can additionally `b ← false` on the model.
+///   - If `dist[x][y] ≤ d`, the gated edge is already implied by the
+///     globally-active subgraph regardless of `b`. Drop it.
+///
+/// Returns the surviving edges. No-op when `parameters().simplify` is
+/// false.
+pub(crate) fn simplify_johnson_pruning(model: &Model, edges: Vec<DiffEdge>) -> Vec<DiffEdge> {
+	if !model.diff_logic.parameters.simplify {
+		return edges;
+	}
+
+	// Intern endpoints and build node table.
+	let mut node_of: FxHashMap<View<IntVal>, usize> = FxHashMap::default();
+	let mut int_vars: Vec<View<IntVal>> = Vec::new();
+	for e in &edges {
+		for endpoint in [e.x, e.y] {
+			if let std::collections::hash_map::Entry::Vacant(entry) = node_of.entry(endpoint) {
+				int_vars.push(endpoint);
+				let _ = entry.insert(int_vars.len() - 1);
+			}
+		}
+	}
+	let n = int_vars.len();
+	if n == 0 {
+		return edges;
+	}
+
+	// Globally-active subgraph adjacency.
+	let mut active_out: Vec<Vec<usize>> = vec![Vec::new(); n];
+	for (idx, edge) in edges.iter().enumerate() {
+		if edge.gate.is_some() {
+			continue;
+		}
+		let from = node_of[&edge.x];
+		active_out[from].push(idx);
+	}
+
+	// Bellman-Ford for pi (the engine repeats this; model-stage version
+	// is independent so we can prune before any solver state exists).
+	let mut pi: Vec<IntVal> = vec![0; n];
+	let mut changed = true;
+	for _ in 0..n {
+		changed = false;
+		for adj in &active_out {
+			for &e_idx in adj {
+				let edge = &edges[e_idx];
+				let from = node_of[&edge.x];
+				let to = node_of[&edge.y];
+				let cand = pi[from].saturating_add(edge.d);
+				if cand < pi[to] {
+					pi[to] = cand;
+					changed = true;
+				}
+			}
+		}
+		if !changed {
+			break;
+		}
+	}
+	if changed {
+		// Negative cycle — Slice 1 should already have caught this.
+		// Pass through unchanged; the engine's `bellman_ford_init_pi`
+		// will report it again.
+		return edges;
+	}
+
+	// Johnson: Dijkstra from every source with reduced (non-negative)
+	// weights. `dist[u][v]` = shortest-path distance in the original
+	// graph, or `IntVal::MAX` if unreachable.
+	let mut dist: Vec<Vec<IntVal>> = vec![vec![IntVal::MAX; n]; n];
+	for src in 0..n {
+		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
+		dist_src[src] = 0;
+		let mut queue: crate::helpers::priority_queue::LazyPriorityQueue<
+			usize,
+			std::cmp::Reverse<IntVal>,
+		> = crate::helpers::priority_queue::LazyPriorityQueue::new();
+		let _ = queue.push(src, std::cmp::Reverse(0));
+		while let Some((u, std::cmp::Reverse(d_u))) = queue.pop() {
+			if d_u > dist_src[u] {
+				continue; // stale
+			}
+			for &e_idx in &active_out[u] {
+				let edge = &edges[e_idx];
+				let v = node_of[&edge.y];
+				let reduced_w = pi[u].saturating_add(edge.d).saturating_sub(pi[v]);
+				let alt = d_u.saturating_add(reduced_w);
+				if alt < dist_src[v] {
+					dist_src[v] = alt;
+					let _ = queue.push_increase(v, std::cmp::Reverse(alt));
+				}
+			}
+		}
+		for dst in 0..n {
+			if dist_src[dst] != IntVal::MAX {
+				dist[src][dst] = dist_src[dst]
+					.saturating_add(pi[dst])
+					.saturating_sub(pi[src]);
+			}
+		}
+	}
+
+	// Filter edges based on the distance matrix.
+	edges
+		.into_iter()
+		.filter(|edge| {
+			let from = node_of[&edge.x];
+			let to = node_of[&edge.y];
+			match edge.gate {
+				None => {
+					// Drop iff a strictly shorter path exists without this edge.
+					dist[from][to] >= edge.d
+				}
+				Some(_) => {
+					// Drop if gate forced false (reverse path forbids the edge),
+					// or if the edge is already implied by the global subgraph.
+					if dist[to][from] != IntVal::MAX && dist[to][from] < -edge.d {
+						false
+					} else {
+						!(dist[from][to] != IntVal::MAX && dist[from][to] <= edge.d)
+					}
+				}
+			}
+		})
+		.collect()
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -288,6 +453,75 @@ mod tests {
 		let (vx, vy, vz) = captured.expect("Satisfied implies a solution was reported");
 		assert!(vy <= vx, "y={vy} > x={vx} violates y - x ≤ 0");
 		assert!(vz <= vy, "z={vz} > y={vy} violates z - y ≤ 0");
+	}
+
+	#[test]
+	fn implied_edge_propagates_when_gate_true() {
+		use crate::solver::{Solver, Status, Valuation};
+
+		// b → (y - x ≤ 0). With b fixed true, y ≤ x must hold.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=5);
+		let y = model.new_int_decision(0..=5);
+		let b = model.new_bool_decision();
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Implied(b, y, x, 0))
+		);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		let sb = map.get(&mut slv, b);
+		// Force b = true by adding a unit clause.
+		slv.add_clause([sb]).unwrap();
+
+		let mut captured = None;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				captured = Some((sx.val(sol), sy.val(sol), sb.val(sol)));
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		let (vx, vy, vb) = captured.unwrap();
+		assert!(vb);
+		assert!(vy <= vx, "with b=true, y={vy} > x={vx} violates y - x ≤ 0");
+	}
+
+	#[test]
+	fn reified_edge_negation_propagates_when_gate_false() {
+		use crate::solver::{Solver, Status, Valuation};
+
+		// b ↔ (x - y ≤ 0). With b fixed false, x - y > 0 (i.e. x > y).
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=5);
+		let y = model.new_int_decision(0..=5);
+		let b = model.new_bool_decision();
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Reified(b, x, y, 0))
+		);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		let sb = map.get(&mut slv, b);
+		slv.add_clause([!sb]).unwrap();
+
+		let mut captured = None;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				captured = Some((sx.val(sol), sy.val(sol), sb.val(sol)));
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		let (vx, vy, vb) = captured.unwrap();
+		assert!(!vb);
+		assert!(vx > vy, "with b=false, x={vx} ≤ y={vy} violates ¬b ⇒ x > y");
 	}
 
 	#[test]

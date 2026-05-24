@@ -1040,7 +1040,9 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		d: IntVal,
 		gate: Option<View<bool>>,
 	) {
-		use crate::solver::engine::diff_logic::DifferenceLogicBoundsShell;
+		use crate::solver::engine::diff_logic::{
+			DifferenceLogicBooleansShell, DifferenceLogicBoundsShell,
+		};
 
 		let mut needs_register = false;
 		{
@@ -1057,11 +1059,18 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		}
 		if needs_register {
 			self.add_propagator(Box::new(DifferenceLogicBoundsShell), true);
-			let prop_ref = {
+			let bounds_ref = {
 				let engine = self.engine.borrow();
 				PropRef::new(engine.propagators.len() - 1)
 			};
-			self.engine.borrow_mut().state.diff_logic.bounds_ref = Some(prop_ref);
+			self.engine.borrow_mut().state.diff_logic.bounds_ref = Some(bounds_ref);
+
+			self.add_propagator(Box::new(DifferenceLogicBooleansShell), true);
+			let booleans_ref = {
+				let engine = self.engine.borrow();
+				PropRef::new(engine.propagators.len() - 1)
+			};
+			self.engine.borrow_mut().state.diff_logic.booleans_ref = Some(booleans_ref);
 		}
 	}
 

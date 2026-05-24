@@ -482,6 +482,7 @@ impl LowererComplete<&mut Model> {
 			let edges = model::diff_logic::expand_collection(model, raw);
 			let edges = model::diff_logic::simplify_cycle_detection(model, edges)
 				.map_err(LoweringError::from)?;
+			let edges = model::diff_logic::simplify_johnson_pruning(model, edges);
 			for edge in edges {
 				let xv = map.get(&mut slv, edge.x);
 				let yv = map.get(&mut slv, edge.y);
