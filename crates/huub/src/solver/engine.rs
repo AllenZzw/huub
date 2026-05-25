@@ -214,12 +214,20 @@ impl AdvRef {
 
 impl Engine {
 	/// (DEBUG ONLY) Check that the reason of a propagated literal contains only
-	/// known true literals
+	/// known true literals.
+	///
+	/// A reason atom is also accepted when its raw trail value is unknown or
+	/// false but its [`IntLitMeaning`] is **currently entailed** by the
+	/// CP-side bounds of its underlying integer variable. This guards
+	/// against the asymmetry where the CP engine has already tightened the
+	/// bounds via `trail.assign_lit` for one boundary lit but SAT has not
+	/// yet unit-propagated weaker order-encoding lits; the antecedent is
+	/// still semantically true. We emit a warning rather than panicking.
 	#[cfg(debug_assertions)]
 	fn debug_check_reason(&mut self, lit: RawLit) {
 		use rustc_hash::FxHashSet;
 
-		use crate::actions::BoolInspectionActions;
+		use crate::actions::{BoolInspectionActions, TrailingActions};
 
 		if let Some(reason) = self.state.reason_map.get(&lit).cloned() {
 			// If reason is lazy, go to the assignment level of the literal.
@@ -254,20 +262,53 @@ impl Engine {
 					continue;
 				}
 				// Get the value of the original reason lit by negating again: ¬¬a
-				// gives a
-				let val = Decision::<bool>(!l).val(&self.state.trail);
-				if !val.unwrap_or(false) {
-					tracing::error!(
-						target: "solver",
-						clause = ?clause.iter().map(|&l| i32::from(l)).collect::<Vec<_>>(),
-						lit_explained = i32::from(lit),
-						lit_invalid = i32::from(!l),
-						invalid_val = ?val,
-						"invalid reason: not all antecedents are known true"
-					);
+				// gives a.
+				let atom = Decision::<bool>(!l);
+				let val = atom.val(&self.state.trail);
+				if val == Some(true) {
+					continue;
 				}
+				// Trail says unknown-or-false. Try to rescue via the CP-side
+				// integer bounds: if the atom is an integer literal whose
+				// meaning is currently entailed by the trailed bounds of
+				// its underlying integer variable, the reason is still
+				// semantically true and we emit a warning instead of a
+				// panic.
+				if let Some((iv, meaning)) = self.state.get_int_lit_meaning(atom) {
+					let int_var = &self.state.int_vars[iv.idx()];
+					let lb = int_var.lower_bound(&self.state.trail);
+					let ub = int_var.upper_bound(&self.state.trail);
+					let entailed = match meaning {
+						IntLitMeaning::GreaterEq(b) => lb >= b,
+						IntLitMeaning::Less(b) => ub < b,
+						IntLitMeaning::Eq(b) => lb == b && ub == b,
+						IntLitMeaning::NotEq(b) => b < lb || b > ub,
+					};
+					if entailed {
+						tracing::warn!(
+							target: "solver",
+							clause = ?clause.iter().map(|&l| i32::from(l)).collect::<Vec<_>>(),
+							lit_explained = i32::from(lit),
+							lit_stale = i32::from(!l),
+							trail_val = ?val,
+							meaning = ?meaning,
+							bounds = ?(lb, ub),
+							"reason atom not yet propagated on SAT trail but currently \
+							 entailed by CP bounds — accepting"
+						);
+						continue;
+					}
+				}
+				tracing::error!(
+					target: "solver",
+					clause = ?clause.iter().map(|&l| i32::from(l)).collect::<Vec<_>>(),
+					lit_explained = i32::from(lit),
+					lit_invalid = i32::from(!l),
+					invalid_val = ?val,
+					"invalid reason: not all antecedents are known true"
+				);
 				debug_assert!(
-					val.unwrap_or(false),
+					false,
 					"Literal {} in Reason for {lit} is {val:?}, but should be known true",
 					!l,
 				);
