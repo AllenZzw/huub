@@ -1020,8 +1020,18 @@ impl State {
 				self.reason_map.insert(lit, reason);
 			}
 			Err(true) => {
-				// No (previous) reason required
-				self.reason_map.remove(&lit);
+				// The propagator built a reason whose atoms all reduce to
+				// `BoolView::Const(true)` — i.e. the propagation is
+				// universally entailed and needs no antecedents. Store
+				// an explicit empty-conjunction reason so the debug
+				// `debug_check_reason` invariant ("propagated literals at
+				// non-zero levels have a registered reason") holds. The
+				// downstream `add_reason_clause` materializes this as
+				// `vec![propagated_lit]` — a tautological unit clause
+				// that SAT treats as a level-0 unit, matching the
+				// semantics of a universal fact.
+				self.reason_map
+					.insert(lit, Reason::Eager(Vec::new().into_boxed_slice()));
 			}
 			Err(false) => unreachable!("invalid reason"),
 		}
@@ -1166,5 +1176,200 @@ mod tests {
 		assert_eq!(propagated, None);
 
 		assert_eq!(*notifications.borrow(), 1);
+	}
+
+	/// Regression test for the `Err(true)` reason path.
+	///
+	/// When a propagator's reason atoms are all `BoolView::Const(true)`
+	/// — e.g. `view.lit(ctx, GreaterEq(v))` where `v` is at or below
+	/// the view's original domain min — `Reason::from_view` filters
+	/// them out and returns `Err(true)`. Semantically this is "the
+	/// propagation is universally entailed; no antecedents needed."
+	///
+	/// Before the fix, `register_reason(_, Err(true))` removed the
+	/// reason map entry; at non-zero decision levels the debug-only
+	/// `debug_check_reason` then panicked even though `add_reason_clause`
+	/// would have correctly returned a tautological unit clause.
+	///
+	/// The fix stores an explicit empty-conjunction `Reason::Eager` in
+	/// the map so the invariant ("registered reason for propagated
+	/// literals at non-zero levels") holds. The reason clause delivered
+	/// to SAT is unchanged: `vec![propagated_lit]`.
+	#[test]
+	fn err_true_reason_does_not_panic_at_nonzero_level() {
+		use std::{cell::RefCell, rc::Rc};
+
+		use crate::actions::BoolInitActions;
+
+		#[derive(Clone, Debug)]
+		struct EmptyReasonOnTrigger {
+			trigger: Decision<bool>,
+			target: View<IntVal>,
+			fired: Rc<RefCell<bool>>,
+		}
+
+		impl Propagator<Engine> for EmptyReasonOnTrigger {
+			fn initialize(
+				&mut self,
+				ctx: &mut <Engine as ReasoningEngine>::InitializationContext<'_>,
+			) {
+				self.trigger.advise_when_fixed(ctx, 0);
+			}
+
+			fn advise_of_bool_change(
+				&mut self,
+				_: &mut <Engine as ReasoningEngine>::NotificationContext<'_>,
+				_: u64,
+			) -> bool {
+				true
+			}
+
+			fn propagate(
+				&mut self,
+				ctx: &mut <Engine as ReasoningEngine>::PropagationContext<'_>,
+			) -> Result<(), <Engine as ReasoningEngine>::Conflict> {
+				if *self.fired.borrow() {
+					return Ok(());
+				}
+				*self.fired.borrow_mut() = true;
+				// `tighten_min` with an empty reason vector → `Err(true)`
+				// reason — the exact path we want to exercise.
+				self.target.tighten_min(ctx, 1, Vec::<View<bool>>::new())?;
+				Ok(())
+			}
+		}
+
+		let mut slv: Solver = Solver::default();
+		let trigger = slv.new_bool_decision();
+		let target = slv
+			.new_int_decision(0..=2)
+			.order_literals(LiteralStrategy::Eager)
+			.view();
+		let target_ge_1 = target.lit(&mut slv, IntLitMeaning::GreaterEq(1));
+		let BoolView::Lit(target_ge_1_lit) = target_ge_1.0 else {
+			unreachable!()
+		};
+
+		let fired = Rc::new(RefCell::new(false));
+		slv.add_propagator(
+			Box::new(EmptyReasonOnTrigger {
+				trigger,
+				target,
+				fired: Rc::clone(&fired),
+			}),
+			false,
+		);
+
+		let (mut actions, mut engine) = slv.as_parts_mut();
+
+		// Push to decision level 1, then assign the trigger boolean to
+		// wake the propagator. With the fix, the engine's
+		// `debug_check_reason` accepts the `Err(true)`-resulting
+		// propagation without panicking.
+		ExternalPropagator::notify_new_decision_level(&mut *engine);
+		ExternalPropagator::notify_assignments(&mut *engine, &[trigger.0]);
+		let propagated = ExternalPropagator::propagate(&mut *engine, &mut actions);
+		assert_eq!(propagated, Some(target_ge_1_lit.0));
+		assert!(*fired.borrow());
+
+		// The reason clause for a universally-entailed propagation is the
+		// tautological unit `[propagated_lit]`.
+		let clause = ExternalPropagator::add_reason_clause(&mut *engine, target_ge_1_lit.0);
+		assert_eq!(clause, vec![target_ge_1_lit.0]);
+	}
+
+	/// Practical regression for the same `Err(true)` reason path using a
+	/// real propagator (`IntArrayMinimumBounds`).
+	///
+	/// Scenario: `min = array_min(a, b, c)` where `a ∈ 0..=100`,
+	/// `b ∈ 0..=5`, `c ∈ 0..=50`, and `min ∈ 0..=200`. The propagator is
+	/// posted with `from_model = true` so its level-0 fix-point pass is
+	/// skipped (`simplify` / model lowering normally consume the path on
+	/// `develop`; this matches the situation that arises in `radiation_i6_9`
+	/// once diff-logic auto-detection lands and the propagator re-fires
+	/// after a search decision instead of at level 0).
+	///
+	/// At decision level 1 we assign `c < 10`, which tightens `c`'s upper
+	/// bound from 50 to 9 and wakes the bounds advisor. Inside
+	/// `propagate`:
+	///   min_ub      = min(100, 5, 9) = 5
+	///   min_ub_var  = b   (still at its original upper bound 5)
+	///   reason      = [b.max_lit(ctx)] = [BoolView::Const(true)]
+	///
+	/// The single-atom reason filters to empty, `Reason::from_view`
+	/// returns `Err(true)`, and the engine registers an empty-eager
+	/// reason. Before the fix, `debug_check_reason` panicked here; with
+	/// the fix the explanation pipeline produces the tautological unit
+	/// clause `[min ≤ 5]` and search continues.
+	#[test]
+	fn err_true_reason_in_int_array_minimum_at_nonzero_level() {
+		use crate::constraints::int_array_minimum::IntArrayMinimumBounds;
+
+		let mut slv: Solver = Solver::default();
+		let a = slv
+			.new_int_decision(0..=100)
+			.order_literals(LiteralStrategy::Eager)
+			.view();
+		let b = slv
+			.new_int_decision(0..=5)
+			.order_literals(LiteralStrategy::Eager)
+			.view();
+		let c = slv
+			.new_int_decision(0..=50)
+			.order_literals(LiteralStrategy::Eager)
+			.view();
+		let min = slv
+			.new_int_decision(0..=200)
+			.order_literals(LiteralStrategy::Eager)
+			.view();
+
+		// Bound-tightening literals we need to drive the engine and to
+		// match against the expected propagation result.
+		let c_lt_10 = c.lit(&mut slv, IntLitMeaning::Less(10));
+		let BoolView::Lit(c_lt_10_lit) = c_lt_10.0 else {
+			unreachable!()
+		};
+		let min_lt_6 = min.lit(&mut slv, IntLitMeaning::Less(6));
+		let BoolView::Lit(min_lt_6_lit) = min_lt_6.0 else {
+			unreachable!()
+		};
+
+		// Post the propagator with `from_model = true` so it is *not*
+		// enqueued at level 0 — emulating the situation where the
+		// propagator's first opportunity to fire happens after a
+		// decision has been made.
+		slv.add_propagator(
+			Box::new(IntArrayMinimumBounds {
+				vars: vec![a, b, c],
+				min,
+			}),
+			true,
+		);
+
+		let (mut actions, mut engine) = slv.as_parts_mut();
+
+		// Level 0: propagate is a no-op because the propagator was
+		// posted with `from_model = true`.
+		assert_eq!(
+			ExternalPropagator::propagate(&mut *engine, &mut actions),
+			None,
+		);
+
+		// Push to decision level 1 and assign `c < 10`. This drops
+		// `c`'s upper bound from 50 to 9 and fires the bounds advisor,
+		// which re-enqueues `IntArrayMinimumBounds`.
+		ExternalPropagator::notify_new_decision_level(&mut *engine);
+		ExternalPropagator::notify_assignments(&mut *engine, &[c_lt_10_lit.0]);
+
+		// Dequeue and run the propagator. With the engine fix it
+		// produces `min < 6` (i.e. `min ≤ 5`); without the fix the
+		// `debug_check_reason` assertion panics here.
+		let propagated = ExternalPropagator::propagate(&mut *engine, &mut actions);
+		assert_eq!(propagated, Some(min_lt_6_lit.0));
+
+		// The reason clause is the tautological unit: SAT treats it as
+		// a level-0 unit, matching the universal-entailment semantics.
+		let clause = ExternalPropagator::add_reason_clause(&mut *engine, min_lt_6_lit.0);
+		assert_eq!(clause, vec![min_lt_6_lit.0]);
 	}
 }
