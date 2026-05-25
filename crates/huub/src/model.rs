@@ -151,6 +151,124 @@ impl Model {
 	pub fn resolve_alias(&self, view: View<IntVal>) -> View<IntVal> {
 		view.resolve_alias(self).into_inner()
 	}
+
+	/// Try to route a normalized linear constraint into the difference
+	/// logic collection.
+	///
+	/// `terms` are the LHS terms with their coefficients folded in (so
+	/// `2 · x` shows up as a `View<IntVal>` whose underlying linear view
+	/// has `scale = 2`); `rhs` is the constant on the right-hand side
+	/// after the LHS offset has been moved over.
+	///
+	/// Returns `Some(Ok(()))` when the constraint matched a diff-logic
+	/// pattern and has been added to `self.diff_logic`. Returns
+	/// `Some(Err(_))` if matching succeeded but posting a side-effect
+	/// (none of the level-1 paths post anything, so this is reserved for
+	/// forward compatibility). Returns `None` when the pattern doesn't
+	/// fit — the caller should fall back to the normal `IntLinear` post.
+	///
+	/// Matching requires exactly two terms whose underlying views are
+	/// unit-scaled and have opposite signs (`x − y` shape). Any other
+	/// shape returns `None`.
+	pub(crate) fn try_route_diff_logic(
+		&mut self,
+		terms: &[View<IntVal>],
+		comparator: crate::constraints::int_linear::LinComparator,
+		rhs: IntVal,
+		reif: Option<crate::constraints::int_linear::Reification>,
+	) -> Option<Result<(), Conflict<View<bool>>>> {
+		use crate::{
+			constraints::int_linear::{LinComparator, Reification},
+			model::{diff_logic::DifferenceLogicConstraint as DLC, view::integer::IntView},
+		};
+
+		if terms.len() != 2 {
+			return None;
+		}
+
+		// Pull (variable view, sign) out of each term. A diff-logic edge
+		// shape requires both terms to be unit-scaled (`scale == ±1`,
+		// `offset == 0`).
+		fn unit_scale(term: View<IntVal>) -> Option<(View<IntVal>, IntVal)> {
+			match term.0 {
+				IntView::Linear(lin) => {
+					let s = lin.scale.get();
+					if lin.offset != 0 {
+						return None;
+					}
+					if s == 1 {
+						Some((term, 1))
+					} else if s == -1 {
+						Some((-term, -1))
+					} else {
+						None
+					}
+				}
+				IntView::Bool(lin) => {
+					let s = lin.scale.get();
+					if lin.offset != 0 {
+						return None;
+					}
+					if s == 1 {
+						Some((term, 1))
+					} else if s == -1 {
+						Some((-term, -1))
+					} else {
+						None
+					}
+				}
+				IntView::Const(_) => None,
+			}
+		}
+
+		let (a, sa) = unit_scale(terms[0])?;
+		let (b, sb) = unit_scale(terms[1])?;
+		if sa + sb != 0 {
+			// Both positive or both negative; this is `x + y` shape,
+			// not `x − y`.
+			return None;
+		}
+		// Normalize so `x` carries the +1 coefficient.
+		let (x, y) = if sa == 1 { (a, b) } else { (b, a) };
+
+		let level = self.diff_logic.parameters().level;
+		// `match` returns the list of diff-logic constraints to add for
+		// this (comparator, reif) combination, gated by level. Returning
+		// an empty `Vec` from a guarded arm means "level too low" and
+		// falls through to the catch-all `_ => return None`.
+		let constraints: Vec<DLC> = match (comparator, reif) {
+			(LinComparator::LessEq, None) if level >= 1 => vec![DLC::Global(x, y, rhs)],
+			(LinComparator::Equal, None) if level >= 1 => {
+				vec![DLC::Global(x, y, rhs), DLC::Global(y, x, -rhs)]
+			}
+			(LinComparator::NotEqual, None) if level >= 3 => vec![DLC::NotEquals(x, y, rhs)],
+			(LinComparator::LessEq, Some(Reification::ImpliedBy(g))) if level >= 1 => {
+				vec![DLC::Implied(g, x, y, rhs)]
+			}
+			(LinComparator::LessEq, Some(Reification::ReifiedBy(g))) if level >= 1 => {
+				vec![DLC::Reified(g, x, y, rhs)]
+			}
+			(LinComparator::Equal, Some(Reification::ImpliedBy(g))) if level >= 2 => {
+				vec![DLC::ImpliedEquals(g, x, y, rhs)]
+			}
+			(LinComparator::Equal, Some(Reification::ReifiedBy(g))) if level >= 3 => {
+				vec![DLC::ReifiedEquals(g, x, y, rhs)]
+			}
+			(LinComparator::NotEqual, Some(Reification::ImpliedBy(g))) if level >= 3 => {
+				vec![DLC::ImpliedNotEquals(g, x, y, rhs)]
+			}
+			// `b ↔ (x − y ≠ d)` is equivalent to `¬b ↔ (x − y == d)`.
+			(LinComparator::NotEqual, Some(Reification::ReifiedBy(g))) if level >= 3 => {
+				vec![DLC::ReifiedEquals(!g, x, y, rhs)]
+			}
+			_ => return None,
+		};
+		for c in constraints {
+			let ok = self.diff_logic.add(c);
+			debug_assert!(ok, "diff-logic level rejected accepted constraint");
+		}
+		Some(Ok(()))
+	}
 }
 
 impl AdvRef {

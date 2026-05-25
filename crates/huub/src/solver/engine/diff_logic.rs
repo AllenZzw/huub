@@ -387,52 +387,19 @@ impl DiffLogicState {
 		reason
 	}
 
-	// ---- Reason builders (with SAT-vs-huub-lag walk) ----
-
-	/// Walk from the propagation-time bound `lb_val` toward the *currently*
-	/// SAT-true lower bound, returning the strongest literal `view >= w`
-	/// (with `lb_val <= w <= cur_min`) that is presently assigned true.
-	///
-	/// SAT-side defining-clause propagation lags huub-level propagation.
-	/// On a trail rewound by conflict analysis, the literal at the exact
-	/// reason level may still be unassigned even though a stronger literal
-	/// is true; the reason atom therefore needs to be the strongest
-	/// currently-true relaxation, not the exact level captured at
-	/// propagation time.
-	fn relaxed_ge_lit(
-		ctx: &mut SolvingContext<'_>,
-		view: View<IntVal>,
-		lb_val: IntVal,
-	) -> View<bool> {
-		let cur_min = view.min(ctx);
-		let mut level = lb_val;
-		while level <= cur_min {
-			let lit = view.lit(ctx, IntLitMeaning::GreaterEq(level));
-			if lit.val(ctx) == Some(true) {
-				return lit;
-			}
-			level += 1;
-		}
-		view.lit(ctx, IntLitMeaning::GreaterEq(lb_val))
-	}
-
-	/// Mirror of [`Self::relaxed_ge_lit`] for `view < strict_ub`.
-	fn relaxed_lt_lit(
-		ctx: &mut SolvingContext<'_>,
-		view: View<IntVal>,
-		strict_ub: IntVal,
-	) -> View<bool> {
-		let cur_max = view.max(ctx);
-		let mut level = strict_ub;
-		while level > cur_max {
-			let lit = view.lit(ctx, IntLitMeaning::Less(level));
-			if lit.val(ctx) == Some(true) {
-				return lit;
-			}
-			level -= 1;
-		}
-		view.lit(ctx, IntLitMeaning::Less(strict_ub))
-	}
+	// ---- Bounds-shell deferred-reason encoding ----
+	//
+	// Bounds-shell propagations register a *lazy* reason. The reason is
+	// rebuilt at explain-time (after `goto_assign_lit`) when the SAT trail
+	// has caught up to the moment of propagation — at which point the
+	// strongest currently-true antecedent literal on the source variable
+	// is available via `lit_relaxed`.
+	//
+	/// Used by the booleans shell to discriminate between bounds-shell
+	/// and booleans-shell encodings in the shared lazy-reason path.
+	/// Bounds-shell reasons are eager (built at propagation time below)
+	/// and never carry this tag.
+	pub(crate) const BOUNDS_TAG: u64 = 1 << 63;
 
 	fn set_int_lower_bound(
 		&mut self,
@@ -443,16 +410,17 @@ impl DiffLogicState {
 		lb_var: usize,
 		lb_val: IntVal,
 	) -> Result<(), Conflict<Decision<bool>>> {
-		let from_view = self.int_vars[lb_var];
 		let target_view = self.int_vars[n];
+		let source_view = self.int_vars[lb_var];
 		let gate = bool_var.map(|b| self.bool_vars[b]);
-		target_view.tighten_min(ctx, value, |ctx: &mut SolvingContext<'_>| {
-			let mut reason = vec![Self::relaxed_ge_lit(ctx, from_view, lb_val)];
-			if let Some(b) = gate {
-				reason.push(b);
+		let reason = move |rctx: &mut SolvingContext<'_>| {
+			let mut atoms = vec![source_view.lit(rctx, IntLitMeaning::GreaterEq(lb_val))];
+			if let Some(g) = gate {
+				atoms.push(g);
 			}
-			reason
-		})?;
+			atoms
+		};
+		target_view.tighten_min(ctx, value, reason)?;
 		Ok(())
 	}
 
@@ -465,16 +433,17 @@ impl DiffLogicState {
 		ub_var: usize,
 		ub_val: IntVal,
 	) -> Result<(), Conflict<Decision<bool>>> {
-		let from_view = self.int_vars[ub_var];
 		let target_view = self.int_vars[n];
+		let source_view = self.int_vars[ub_var];
 		let gate = bool_var.map(|b| self.bool_vars[b]);
-		target_view.tighten_max(ctx, value, |ctx: &mut SolvingContext<'_>| {
-			let mut reason = vec![Self::relaxed_lt_lit(ctx, from_view, ub_val + 1)];
-			if let Some(b) = gate {
-				reason.push(b);
+		let reason = move |rctx: &mut SolvingContext<'_>| {
+			let mut atoms = vec![source_view.lit(rctx, IntLitMeaning::Less(ub_val + 1))];
+			if let Some(g) = gate {
+				atoms.push(g);
 			}
-			reason
-		})?;
+			atoms
+		};
+		target_view.tighten_max(ctx, value, reason)?;
 		Ok(())
 	}
 
@@ -1113,57 +1082,65 @@ impl Propagator<Engine> for DifferenceLogicBoundsShell {
 		result
 	}
 
+	/// `propagate_bounds` may call `set_bool_false` in its post-pass when
+	/// a tightened bound falsifies a dormant implication edge; that path
+	/// registers a deferred reason whose owner is *this* bounds shell.
+	/// We dispatch through the shared booleans-shell encoder.
 	fn explain(
 		&mut self,
 		ctx: &mut <Engine as crate::actions::ReasoningEngine>::ExplanationContext<'_>,
 		_lit: <Engine as crate::actions::ReasoningEngine>::Atom,
 		data: u64,
 	) -> crate::Conjunction<<Engine as crate::actions::ReasoningEngine>::Atom> {
-		use std::cmp::{max, min};
-
-		use crate::actions::IntExplanationActions;
-
-		// Decoding matches `DiffLogicState::set_bool_false`: low bit is
-		// `lb_fixed`, remaining bits are the edge index.
-		let lb_fixed = (data & 1) != 0;
-		let edge_idx = (data >> 1) as usize;
-		let diff = &ctx.diff_logic;
-		if !lb_fixed {
-			let edge = &diff.edges[edge_idx];
-			let target_ub = diff.int_vars[edge.to].max(ctx);
-			let (lit_lb, IntLitMeaning::GreaterEq(meaning_lb)) = diff.int_vars[edge.from]
-				.lit_relaxed(ctx, IntLitMeaning::GreaterEq(target_ub + edge.val + 1))
-			else {
-				unreachable!("IntLitMeaning should always be GreaterEq");
-			};
-			vec![
-				lit_lb,
-				diff.int_vars[edge.to]
-					.lit_relaxed(
-						ctx,
-						IntLitMeaning::Less(max(target_ub + 1, meaning_lb - edge.val)),
-					)
-					.0,
-			]
-		} else {
-			let edge = &diff.edges[edge_idx];
-			let source_lb = diff.int_vars[edge.from].min(ctx);
-			let (lit_ub, IntLitMeaning::Less(meaning_ub)) =
-				diff.int_vars[edge.to].lit_relaxed(ctx, IntLitMeaning::Less(source_lb - edge.val))
-			else {
-				unreachable!("IntLitMeaning should always be Less");
-			};
-			vec![
-				diff.int_vars[edge.from]
-					.lit_relaxed(
-						ctx,
-						IntLitMeaning::GreaterEq(min(source_lb, meaning_ub + edge.val)),
-					)
-					.0,
-				lit_ub,
-			]
-		}
+		let diff = mem::take(&mut ctx.diff_logic);
+		let reason = explain_diff_logic_lazy(&diff, ctx, data);
+		ctx.diff_logic = diff;
+		reason
 	}
+}
+
+/// Shared dispatcher for the booleans shell's lazy reasons. The
+/// bounds shell builds its reasons eagerly (see
+/// [`DiffLogicState::set_int_lower_bound`] /
+/// [`DiffLogicState::set_int_upper_bound`]), so this dispatcher only
+/// handles the booleans-shell `set_bool_false` encoding.
+fn explain_diff_logic_lazy(
+	diff: &DiffLogicState,
+	ctx: &mut <Engine as crate::actions::ReasoningEngine>::ExplanationContext<'_>,
+	data: u64,
+) -> crate::Conjunction<<Engine as crate::actions::ReasoningEngine>::Atom> {
+	use crate::actions::IntExplanationActions;
+
+	debug_assert_eq!(
+		data & DiffLogicState::BOUNDS_TAG,
+		0,
+		"bounds-shell reasons are eager; lazy dispatcher should only see booleans-shell encodings"
+	);
+
+	// Booleans-shell encoding (lazy reason for `set_bool_false`).
+	//
+	// The falsification `bv = false` is justified by the inconsistency
+	// `source.lb - target.ub > edge.val`. The tightest reason captures
+	// the exact boundary values that triggered the inconsistency, but
+	// under Eager order encoding the literal at the exact boundary may
+	// have never been directly assigned by SAT — only a strictly
+	// stronger literal at the source's current lb (or weaker than the
+	// target's current ub) is on the trail. To stay sound under both
+	// encoding strategies, we report the source's *current* lb and the
+	// target's *current* ub at explain-time as the antecedents.
+	// `goto_assign_lit` positions the trail at the moment of
+	// propagation, so these bounds are exactly the historical ones, and
+	// the literals at those bounds are the ones that were assigned via
+	// `tighten_min` / `tighten_max` and therefore on the SAT trail.
+	let _lb_fixed = (data & 1) != 0;
+	let edge_idx = (data >> 1) as usize;
+	let edge = &diff.edges[edge_idx];
+	let source_lb = diff.int_vars[edge.from].min(ctx);
+	let target_ub = diff.int_vars[edge.to].max(ctx);
+	let (lit_from, _) =
+		diff.int_vars[edge.from].lit_relaxed(ctx, IntLitMeaning::GreaterEq(source_lb));
+	let (lit_to, _) = diff.int_vars[edge.to].lit_relaxed(ctx, IntLitMeaning::Less(target_ub + 1));
+	vec![lit_from, lit_to]
 }
 
 /// Trampoline propagator that drives [`DiffLogicState::propagate_booleans`].
@@ -1219,5 +1196,23 @@ impl Propagator<Engine> for DifferenceLogicBooleansShell {
 		let result = diff.propagate_booleans(ctx);
 		ctx.state.diff_logic = diff;
 		result
+	}
+
+	fn explain(
+		&mut self,
+		ctx: &mut <Engine as crate::actions::ReasoningEngine>::ExplanationContext<'_>,
+		_lit: <Engine as crate::actions::ReasoningEngine>::Atom,
+		data: u64,
+	) -> crate::Conjunction<<Engine as crate::actions::ReasoningEngine>::Atom> {
+		// Both `set_bool_false` (this shell) and `set_int_lower_bound` /
+		// `set_int_upper_bound` (invoked indirectly via
+		// `propagate_edge_addition` inside `propagate_booleans`) can
+		// register lazy reasons attributed to this propagator. The shared
+		// dispatcher tells the two encodings apart by the top bit of
+		// `data`.
+		let diff = mem::take(&mut ctx.diff_logic);
+		let reason = explain_diff_logic_lazy(&diff, ctx, data);
+		ctx.diff_logic = diff;
+		reason
 	}
 }

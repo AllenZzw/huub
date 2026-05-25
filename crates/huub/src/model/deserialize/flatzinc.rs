@@ -1998,6 +1998,11 @@ impl<'a> FznModelBuilder<'a> {
 					};
 					let a = self.arg_int(a)?;
 					let b = self.arg_int(b)?;
+					// `Model::linear` calls `try_route_diff_logic` before
+					// posting, so the resulting `a − b ≤ 0` /
+					// `a − b ≠ 0` is auto-routed into the diff-logic
+					// collection when it matches the 2-term unit-coeff
+					// pattern.
 					let lin = self.prb.linear(a);
 					match ident {
 						ConstraintIdent::IntLe => lin.le(b),
@@ -2019,6 +2024,9 @@ impl<'a> FznModelBuilder<'a> {
 					let b = self.arg_int(b)?;
 					let r = self.arg_bool(r)?;
 
+					// Diff-logic auto-detection inside `Model::linear`
+					// handles reified 2-term diffs (Implied / Reified /
+					// ImpliedEquals / ReifiedEquals / ImpliedNotEquals).
 					let lin = self.prb.linear(a);
 					let lin = match ident {
 						ConstraintIdent::IntEqImp | ConstraintIdent::IntEqReif => lin.eq(b),
@@ -2054,6 +2062,10 @@ impl<'a> FznModelBuilder<'a> {
 						.map(|l| self.lit_int(l))
 						.try_collect()?;
 					let rhs = self.arg_par_int(rhs)?;
+					// Two-term cases with unit coefficients (e.g. jobshop
+					// precedence) flow through `Model::linear` →
+					// `try_route_diff_logic`. Longer or non-unit linears
+					// stay on the IntLinear path.
 					let mut terms = Vec::with_capacity(vars.len());
 					for (x, c) in vars.into_iter().zip(coeffs) {
 						terms.push(x.bounding_mul(&mut self.prb, c)?);

@@ -263,6 +263,17 @@ impl Model {
 			Comparator::NotEqual => (LinComparator::NotEqual, rhs),
 		};
 
+		// Diff-logic auto-detection: if the normalized linear matches
+		// `±x ∓ y op rhs` with unit coefficients, route to
+		// `self.diff_logic` instead of constructing an IntLinear.
+		// `try_route_diff_logic` gates itself on the collection's level
+		// (default 0 = disabled); callers opt in by raising the level
+		// via `DifferenceLogicCollection::set_parameters` or the CLI
+		// `--diff-logic` flag.
+		if let Some(result) = self.try_route_diff_logic(&terms, comparator, rhs, reif) {
+			return result;
+		}
+
 		if IntLinear::can_overflow(self, &terms) {
 			self.post_constraint(IntLinear::<OverflowPossible> {
 				terms,

@@ -56,8 +56,18 @@ pub struct DifferenceLogicParameters {
 
 impl Default for DifferenceLogicParameters {
 	fn default() -> Self {
+		// Default to 1: `Global` / `Implied` / `Reified` constraints are
+		// auto-routed through the difference-logic engine; equality
+		// (`ImpliedEquals`) and disequality (`NotEquals`,
+		// `ImpliedNotEquals`, `ReifiedEquals`) variants are *not* accepted
+		// — benchmarking showed they regress some corpus instances
+		// (`svrp_s4_v2_c3` +15% at level 2, `amaze3_2012_03_19` +31% at
+		// level 3) without net wins elsewhere. Opt in to higher levels
+		// via [`DifferenceLogicCollection::set_parameters`] or (PR9) the
+		// CLI's `--diff-logic` flag; set level 0 to disable routing
+		// entirely.
 		Self {
-			level: 3,
+			level: 1,
 			simplify: true,
 		}
 	}
@@ -77,10 +87,11 @@ impl DifferenceLogicCollection {
 		self.parameters
 	}
 
-	/// Mutably set the parameters governing this collection (used by the
-	/// [`crate::lower::Lowerer`] builder to thread CLI / programmatic
-	/// configuration through).
-	pub(crate) fn set_parameters(&mut self, parameters: DifferenceLogicParameters) {
+	/// Mutably set the parameters governing this collection. Used by the
+	/// [`crate::lower::Lowerer`] builder, the CLI, and programmatic
+	/// callers that want to opt into diff-logic auto-detection (default
+	/// level 0 disables everything).
+	pub fn set_parameters(&mut self, parameters: DifferenceLogicParameters) {
 		self.parameters = parameters;
 	}
 
@@ -634,6 +645,29 @@ mod tests {
 	use super::*;
 	use crate::model::Model;
 
+	/// Build a model with diff-logic auto-detection enabled at level 3
+	/// (accepts every constraint variant). The default level is 0
+	/// (disabled) so every test that touches diff-logic must opt in.
+	fn diff_logic_enabled_model() -> Model {
+		let mut m = Model::default();
+		m.diff_logic.set_parameters(DifferenceLogicParameters {
+			level: 3,
+			simplify: true,
+		});
+		m
+	}
+
+	/// Build a [`DifferenceLogicCollection`] with the level set to the
+	/// given value (and `simplify: true`).
+	fn collection_with_level(level: u8) -> DifferenceLogicCollection {
+		let mut col = DifferenceLogicCollection::default();
+		col.set_parameters(DifferenceLogicParameters {
+			level,
+			simplify: true,
+		});
+		col
+	}
+
 	#[test]
 	fn empty_collection_is_empty() {
 		let col = DifferenceLogicCollection::default();
@@ -642,11 +676,23 @@ mod tests {
 	}
 
 	#[test]
+	fn level_0_rejects_everything() {
+		// Default level is now 1; use `collection_with_level(0)` to
+		// explicitly construct a disabled collection.
+		let mut model = Model::default();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let mut col = collection_with_level(0);
+		assert!(!col.add(DifferenceLogicConstraint::Global(x, y, 3)));
+		assert!(col.is_empty());
+	}
+
+	#[test]
 	fn level_1_accepts_global() {
 		let mut model = Model::default();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let mut col = DifferenceLogicCollection::default();
+		let mut col = collection_with_level(1);
 		assert!(col.add(DifferenceLogicConstraint::Global(x, y, 3)));
 		assert_eq!(col.len(), 1);
 	}
@@ -656,7 +702,7 @@ mod tests {
 		let mut model = Model::default();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let mut col = DifferenceLogicCollection::default();
+		let mut col = collection_with_level(1);
 		let _ = col.add(DifferenceLogicConstraint::Global(x, y, 3));
 		let drained = col.take_constraints();
 		assert_eq!(drained.len(), 1);
@@ -669,7 +715,7 @@ mod tests {
 
 		// x ≥ 0, y - x ≤ 0 (i.e. y ≤ x), z - y ≤ 0 (z ≤ y).
 		// Together: z ≤ y ≤ x. Force x ≥ 5 → all three end up ≥ 0 with z ≤ y ≤ x.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
 		let z = model.new_int_decision(0..=10);
@@ -708,7 +754,7 @@ mod tests {
 		use crate::solver::{Solver, Status, Valuation};
 
 		// b → (y - x ≤ 0). With b fixed true, y ≤ x must hold.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=5);
 		let y = model.new_int_decision(0..=5);
 		let b = model.new_bool_decision();
@@ -743,7 +789,7 @@ mod tests {
 		use crate::solver::{Solver, Status, Valuation};
 
 		// b ↔ (x - y ≤ 0). With b fixed false, x - y > 0 (i.e. x > y).
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=5);
 		let y = model.new_int_decision(0..=5);
 		let b = model.new_bool_decision();
@@ -780,7 +826,7 @@ mod tests {
 		};
 
 		// x − y ≠ 2. Pin y = 1 → x must avoid 3.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=4);
 		let y = model.new_int_decision(0..=4);
 		assert!(
@@ -821,7 +867,7 @@ mod tests {
 		use crate::solver::{Solver, Status, Valuation};
 
 		// b → (x − y == 2). With b forced true, every solution has x = y + 2.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
 		let b = model.new_bool_decision();
@@ -854,7 +900,7 @@ mod tests {
 		use crate::solver::{Solver, Status, Valuation};
 
 		// b ↔ (x − y == 0). With b forced false, every solution has x ≠ y.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=3);
 		let y = model.new_int_decision(0..=3);
 		let b = model.new_bool_decision();
@@ -883,10 +929,55 @@ mod tests {
 	}
 
 	#[test]
+	fn linear_route_picks_up_two_term_diff_constraint() {
+		// model.linear([1, -1], [x, y]).le(3).post() should be auto-
+		// detected as `Global(x, y, 3)` and land in `model.diff_logic`
+		// rather than as an IntLinear.
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		assert!(model.diff_logic.is_empty());
+		// Build `x − y ≤ 3` via the linear builder.
+		model.linear(x - y).le(3).post().unwrap();
+		assert_eq!(
+			model.diff_logic.len(),
+			1,
+			"linear() should have routed the 2-term diff into diff_logic"
+		);
+	}
+
+	#[test]
+	fn linear_route_skips_three_term_linear() {
+		// `x + y + z ≤ 5` has three terms and stays in IntLinear.
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let z = model.new_int_decision(0..=10);
+		model.linear(x + y + z).le(5).post().unwrap();
+		assert!(
+			model.diff_logic.is_empty(),
+			"three-term linear must not route to diff_logic"
+		);
+	}
+
+	#[test]
+	fn linear_route_skips_non_unit_coefficients() {
+		// `2x − y ≤ 5` has non-unit scale and stays in IntLinear.
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		model.linear(x * 2 - y).le(5).post().unwrap();
+		assert!(
+			model.diff_logic.is_empty(),
+			"non-unit coefficient must not route to diff_logic"
+		);
+	}
+
+	#[test]
 	fn equality_cycle_unifies_views() {
 		// x − y ≤ 0 AND y − x ≤ 0 → x == y. Slice 4 should call unify;
 		// the model's alias chain then collapses one view onto the other.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=5);
 		let y = model.new_int_decision(0..=5);
 		assert!(
@@ -917,7 +1008,7 @@ mod tests {
 	#[test]
 	fn negative_cycle_is_detected_at_lowering() {
 		// x − y ≤ -1 AND y − x ≤ -1 → cycle weight −2 → unsatisfiable.
-		let mut model = Model::default();
+		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
 		assert!(
