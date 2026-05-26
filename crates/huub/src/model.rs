@@ -471,6 +471,41 @@ impl Model {
 			.collect()
 	}
 
+	/// Declare a diff-logic pair-based brancher over the given integer
+	/// array. For each pair `(i, j)` with `i < j`, allocate a fresh
+	/// reified Boolean `b_{ij}` and post `Reified(b_{ij}, x_i, x_j, -1)`
+	/// (i.e. `b_{ij} ↔ (x_i < x_j)`) into `self.diff_logic`. The
+	/// returned [`Branching::DiffLogic`] can be passed to
+	/// `Branching::to_solver` (or composed via `Branching::Seq`) after
+	/// lowering — `to_solver` recovers the pair Booleans by looking up
+	/// the gated edges this method posted.
+	///
+	/// Note: this method does NOT detect when an existing diff-logic
+	/// constraint already encodes one of the `x_i < x_j` orderings (e.g.
+	/// a disjunctive constraint). Such subsumption simplification is
+	/// future work; the brancher is sound but may create logically
+	/// redundant Booleans in the meantime.
+	pub fn diff_logic_branching(
+		&mut self,
+		vars: Vec<View<IntVal>>,
+	) -> deserialize::Branching {
+		use crate::{
+			constraints::difference_logic::DifferenceLogicConstraint,
+			model::deserialize,
+		};
+
+		let n = vars.len();
+		for i in 0..n {
+			for j in (i + 1)..n {
+				let b = self.new_bool_decision();
+				let _ = self
+					.diff_logic
+					.add(DifferenceLogicConstraint::Reified(b, vars[i], vars[j], -1));
+			}
+		}
+		deserialize::Branching::DiffLogic(vars)
+	}
+
 	/// Notify propagators of the changes that happened since the last call to
 	/// this method.
 	pub(crate) fn notify_advisors(&mut self) {

@@ -12,7 +12,8 @@ use crate::{
 	solver::{
 		Solver,
 		branchers::{
-			BoolBrancher, DecisionSelection, DomainSelection, IntBrancher, WarmStartBrancher,
+			BoolBrancher, DecisionSelection, DiffLogicBrancher, DomainSelection, IntBrancher,
+			WarmStartBrancher,
 		},
 	},
 };
@@ -49,6 +50,15 @@ pub enum Branching {
 	/// Search by enforcing the given Boolean expressions, but abandon the
 	/// search when finding a conflict.
 	WarmStart(Vec<View<bool>>),
+	/// Diff-logic pair-based brancher over the given integer-view array.
+	/// For each pair `(i, j)` with `i < j` the brancher does two-way
+	/// branching on `x_i < x_j` vs `x_i ≥ x_j` via a reified Boolean
+	/// posted by [`crate::model::Model::diff_logic_branching`]. The
+	/// variant only carries the vars; the pair Booleans are recovered
+	/// from the diff-logic graph at `to_solver` time as the gates of
+	/// the Reified edges that `diff_logic_branching` posted. Construct
+	/// via `Model::diff_logic_branching`, not directly.
+	DiffLogic(Vec<View<IntVal>>),
 }
 
 /// Type of an optimization goal found during model or solver deserialization.
@@ -94,6 +104,47 @@ impl Branching {
 			Branching::WarmStart(exprs) => {
 				let decisions = exprs.iter().map(|v| map.get(slv, *v)).collect();
 				WarmStartBrancher::new_in(slv, decisions);
+			}
+			Branching::DiffLogic(vars) => {
+				let solver_vars: Vec<_> = vars.iter().map(|v| map.get(slv, *v)).collect();
+				let n = solver_vars.len();
+				let mut pair_bools = Vec::with_capacity(n * n.saturating_sub(1) / 2);
+				{
+					let graph = slv.diff_logic_graph().borrow();
+					for i in 0..n {
+						let Some(&from) = graph.int_var_to_node.get(&solver_vars[i]) else {
+							panic!(
+								"Branching::DiffLogic: var {} not interned in diff-logic graph; \
+								 did you call Model::diff_logic_branching to post the pair Reified \
+								 constraints?",
+								i
+							);
+						};
+						for j in (i + 1)..n {
+							let Some(&to) = graph.int_var_to_node.get(&solver_vars[j]) else {
+								panic!(
+									"Branching::DiffLogic: var {} not interned in diff-logic graph",
+									j
+								);
+							};
+							let gate = graph
+								.edges
+								.iter()
+								.find(|e| {
+									e.from == from
+										&& e.to == to && e.val == -1
+										&& e.bool_var.is_some()
+								})
+								.map(|e| graph.bool_vars[e.bool_var.unwrap()])
+								.expect(
+									"Branching::DiffLogic constructed without prior \
+									 diff_logic_branching post for this pair",
+								);
+							pair_bools.push(gate);
+						}
+					}
+				}
+				DiffLogicBrancher::new_in(slv, solver_vars, pair_bools);
 			}
 		}
 	}

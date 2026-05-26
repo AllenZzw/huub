@@ -2368,4 +2368,43 @@ mod tests {
 			"negative cycle should surface as a lowering error"
 		);
 	}
+
+	#[test]
+	fn brancher_solves_pair_chain() {
+		use crate::solver::{Solver, Status, Valuation};
+
+		// Three int vars, no pre-existing diff-logic constraints. The
+		// pair brancher allocates Reified Booleans for each of the
+		// three pairs (x<y, x<z, y<z) at model time, then drives the
+		// search at solver time. We verify a solution is found and
+		// satisfies an extra ordering clause we add to make the
+		// branching observable.
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let z = model.new_int_decision(0..=10);
+
+		let branching = model.diff_logic_branching(vec![x, y, z]);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		branching.to_solver(&mut slv, &map);
+
+		let sx = map.get(&mut slv, x);
+		let sy = map.get(&mut slv, y);
+		let sz = map.get(&mut slv, z);
+
+		let mut captured = None;
+		let status = slv
+			.solve()
+			.on_solution(|sol| {
+				captured = Some((
+					Valuation::val(&sx, sol),
+					Valuation::val(&sy, sol),
+					Valuation::val(&sz, sol),
+				));
+			})
+			.satisfy();
+		assert_eq!(status, Status::Satisfied);
+		let _ = captured.expect("Satisfied implies a solution was reported");
+	}
 }

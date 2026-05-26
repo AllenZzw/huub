@@ -283,7 +283,8 @@ pub struct Solver<Sat = Cadical> {
 	/// the [`crate::constraints::difference_logic::DifferenceLogicPropagator`]
 	/// when the first edge auto-registers it, and into future brancher /
 	/// lazy-literal-hook consumers.
-	pub(crate) diff_logic_graph: Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>>,
+	pub(crate) diff_logic_graph:
+		Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>>,
 }
 
 /// Structure capturing statistical information about the solver instance and
@@ -1090,6 +1091,16 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		}
 	}
 
+	/// Access the shared diff-logic graph. Used by
+	/// [`crate::model::deserialize::Branching::to_solver`] to look up
+	/// the gates of Reified edges posted by
+	/// [`crate::model::Model::diff_logic_branching`].
+	pub(crate) fn diff_logic_graph(
+		&self,
+	) -> &Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>> {
+		&self.diff_logic_graph
+	}
+
 	/// Add a constraint propagator to the solver to enforce a constraint.
 	pub(crate) fn add_propagator(&mut self, propagator: BoxedPropagator, from_model: bool) {
 		let mut handle = self.engine.borrow_mut();
@@ -1418,7 +1429,8 @@ impl Clone for Solver<Cadical> {
 		}
 		// Deep-clone the diff-logic graph: the new solver owns its own
 		// independent state, sharing nothing with the original.
-		let diff_logic_graph = Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
+		let diff_logic_graph =
+			Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
 		Solver {
 			sat,
 			engine,

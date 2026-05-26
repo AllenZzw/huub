@@ -1,9 +1,12 @@
 //! Module containing methods for making search decisions in the solver.
 
+pub mod diff_logic;
+
 use std::fmt::Debug;
 
 use dyn_clone::DynClone;
 
+pub use crate::solver::branchers::diff_logic::DiffLogicBrancher;
 use crate::{
 	IntVal,
 	actions::{
