@@ -15,31 +15,33 @@
 //! ## Architecture
 //!
 //! - [`DiffLogicState`] lives on the [`crate::solver::Solver`] inside an
-//!   `Rc<RefCell<…>>`. It owns the master edge list, the per-node active-edge
-//!   adjacency lists, the Johnson potential `pi`, and the per-node bound shadow
-//!   used for incremental Dijkstra.
+//!   `Rc<RefCell<…>>`. It owns the master edge list, the per-node
+//!   active-edge adjacency lists, the Johnson potential `pi`, and the
+//!   per-node bound shadow used for incremental Dijkstra.
 //! - [`DifferenceLogicPropagator`] holds an `Rc::clone` of the graph and
-//!   bridges the engine's `Propagator<Engine>` interface to the graph methods
-//!   (`propagate_bounds`, `propagate_booleans`, advisors, reasons). One
-//!   propagator runs both bound and Boolean phases in a single `borrow_mut()`
-//!   scope.
+//!   bridges the engine's `Propagator<Engine>` interface to the graph
+//!   methods (`propagate_bounds`, `propagate_booleans`, advisors,
+//!   reasons). One propagator runs both bound and Boolean phases in a
+//!   single `borrow_mut()` scope.
 //!
 //! ## Known limitations (fixed alongside `tighten_difference`)
 //!
-//! - **No mid-search endpoint introduction.** The propagator's `initialize`
-//!   fires once, when the first [`crate::solver::Solver::add_diff_logic_edge`]
-//!   auto-posts the propagator. Lowering pre-interns every endpoint via
+//! - **No mid-search endpoint introduction.** The propagator's
+//!   `initialize` fires once, when the first
+//!   [`crate::solver::Solver::add_diff_logic_edge`] auto-posts the
+//!   propagator. Lowering pre-interns every endpoint via
 //!   [`crate::solver::Solver::intern_diff_logic_int`] /
 //!   [`crate::solver::Solver::intern_diff_logic_bool`] before any edge is
 //!   registered, so every lowering-time endpoint gets an advisor. But
-//!   `tighten_difference` (future work) would assert a brand-new `x − y ≤ d`
-//!   mid-search — possibly with endpoints not previously in the graph. Those
-//!   late endpoints would be interned by `register_edge` but would have no
-//!   bounds advisor, so subsequent bound changes on them would not wake the
-//!   propagator. The fix is a `subscribe_int_bounds_advisor` helper on
-//!   [`crate::solver::Solver`] (~15 lines) that synthesizes the advisor entry
-//!   without needing an `InitializationContext`; it lands together with
-//!   `tighten_difference`.
+//!   `tighten_difference` (future work) would assert a brand-new
+//!   `x − y ≤ d` mid-search — possibly with endpoints not previously in
+//!   the graph. Those late endpoints would be interned by `register_edge`
+//!   but would have no bounds advisor, so subsequent bound changes on
+//!   them would not wake the propagator. The fix is a
+//!   `subscribe_int_bounds_advisor` helper on
+//!   [`crate::solver::Solver`] (~15 lines) that synthesizes the advisor
+//!   entry without needing an `InitializationContext`; it lands together
+//!   with `tighten_difference`.
 
 use std::{cell::RefCell, cmp::Reverse, mem, rc::Rc};
 
@@ -1186,42 +1188,17 @@ pub enum DifferenceLogicConstraint {
 	/// A globally active difference constraint `x − y ≤ d`.
 	Global(ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// An implied difference constraint `b → (x − y ≤ d)`.
-	Implied(
-		ModelView<bool>,
-		ModelView<IntVal>,
-		ModelView<IntVal>,
-		IntVal,
-	),
+	Implied(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// A reified difference constraint `b ↔ (x − y ≤ d)`.
-	Reified(
-		ModelView<bool>,
-		ModelView<IntVal>,
-		ModelView<IntVal>,
-		IntVal,
-	),
+	Reified(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// An implied equality `b → (x − y == d)`.
-	ImpliedEquals(
-		ModelView<bool>,
-		ModelView<IntVal>,
-		ModelView<IntVal>,
-		IntVal,
-	),
+	ImpliedEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// A disequality `x − y ≠ d`.
 	NotEquals(ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// An implied disequality `b → (x − y ≠ d)`.
-	ImpliedNotEquals(
-		ModelView<bool>,
-		ModelView<IntVal>,
-		ModelView<IntVal>,
-		IntVal,
-	),
+	ImpliedNotEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// A reified equality `b ↔ (x − y == d)`.
-	ReifiedEquals(
-		ModelView<bool>,
-		ModelView<IntVal>,
-		ModelView<IntVal>,
-		IntVal,
-	),
+	ReifiedEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
 }
 
 /// User-tunable knobs for difference-logic processing.
@@ -1556,6 +1533,102 @@ pub(crate) fn simplify_cycle_detection(
 	Ok(edges)
 }
 
+/// Slice 2: model-stage bound tightening.
+///
+/// Walks the participating edges in a Bellman-Ford-style fixed-point and
+/// tightens the model's int-var domains to the graph-implied bounds. A
+/// [`ModelDiffEdge`] stores `edge.x`, `edge.y`, `edge.d` such that the
+/// represented constraint is `edge.x − edge.y ≤ edge.d`:
+///
+/// - `edge.x ≤ edge.y + edge.d`  ⇒  `edge.x.max := min(edge.x.max, edge.y.max +
+///   d)`
+/// - `edge.y ≥ edge.x − edge.d`  ⇒  `edge.y.min := max(edge.y.min, edge.x.min −
+///   d)`
+///
+/// The pass converges in at most `n` iterations on a feasible graph
+/// (Slice 1 has already ruled out negative cycles). Tightening is done
+/// via `IntPropagationActions::tighten_min`/`tighten_max` with an empty
+/// reason (matching [`simplify_unify`]'s convention — these facts are
+/// unconditional at the model's level-0 trail head).
+///
+/// Edge participation:
+/// - `gate == None`: always participates (globally-active).
+/// - `gate == Some(g)` with `g.val(model) == Some(true)`: participates too.
+///   Gated-fixed-true gates arise from `Const(true)`-gated expansions or
+///   upstream model-side bool fixing.
+///
+/// Returns the input edges unchanged on success; mutates the model's
+/// domains as a side effect. Returns `Conflict` if a tightening empties
+/// a domain (which the Lowerer translates to
+/// `LoweringError::Simplification`).
+///
+/// No-op when [`DifferenceLogicParameters::simplify`] is false.
+pub(crate) fn simplify_bound_tightening(
+	model: &mut Model,
+	edges: Vec<ModelDiffEdge>,
+) -> Result<Vec<ModelDiffEdge>, Conflict<ModelView<bool>>> {
+	use crate::actions::{BoolInspectionActions, IntInspectionActions, IntPropagationActions};
+
+	if !model.diff_logic.parameters.simplify {
+		return Ok(edges);
+	}
+
+	// Snapshot the participating edges by index. A `Const(true)` gate
+	// stays entailed throughout the fixed-point (we don't mutate gates
+	// here), so this filter is safe to evaluate once.
+	let participating: Vec<usize> = edges
+		.iter()
+		.enumerate()
+		.filter(|(_, e)| match e.gate {
+			None => true,
+			Some(g) => matches!(g.val(model), Some(true)),
+		})
+		.map(|(i, _)| i)
+		.collect();
+
+	if participating.is_empty() {
+		return Ok(edges);
+	}
+
+	// Number of distinct endpoints — used as the iteration bound. The
+	// fixed-point converges in ≤ n passes for a feasible graph (Slice 1
+	// rules out negative cycles).
+	let mut endpoints: FxHashMap<ModelView<IntVal>, ()> = FxHashMap::default();
+	for &idx in &participating {
+		let _ = endpoints.insert(edges[idx].x, ());
+		let _ = endpoints.insert(edges[idx].y, ());
+	}
+	let n = endpoints.len();
+
+	for _ in 0..n {
+		let mut changed = false;
+		for &idx in &participating {
+			let edge = edges[idx];
+			// edge.x ≤ edge.y + edge.d
+			let y_max = edge.y.max(model);
+			let new_x_max = y_max.saturating_add(edge.d);
+			if new_x_max < edge.x.max(model) {
+				edge.x
+					.tighten_max(model, new_x_max, Vec::<ModelView<bool>>::new())?;
+				changed = true;
+			}
+			// edge.y ≥ edge.x − edge.d
+			let x_min = edge.x.min(model);
+			let new_y_min = x_min.saturating_sub(edge.d);
+			if new_y_min > edge.y.min(model) {
+				edge.y
+					.tighten_min(model, new_y_min, Vec::<ModelView<bool>>::new())?;
+				changed = true;
+			}
+		}
+		if !changed {
+			break;
+		}
+	}
+
+	Ok(edges)
+}
+
 /// Slice 3: Johnson's all-pairs shortest paths + redundant-edge pruning.
 ///
 /// After Slice 1 has populated `pi` and ruled out negative cycles, run
@@ -1573,10 +1646,7 @@ pub(crate) fn simplify_cycle_detection(
 ///
 /// Returns the surviving edges. No-op when `parameters().simplify` is
 /// false.
-pub(crate) fn simplify_johnson_pruning(
-	model: &Model,
-	edges: Vec<ModelDiffEdge>,
-) -> Vec<ModelDiffEdge> {
+pub(crate) fn simplify_johnson_pruning(model: &Model, edges: Vec<ModelDiffEdge>) -> Vec<ModelDiffEdge> {
 	if !model.diff_logic.parameters.simplify {
 		return edges;
 	}
@@ -1643,7 +1713,10 @@ pub(crate) fn simplify_johnson_pruning(
 	for src in 0..n {
 		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
 		dist_src[src] = 0;
-		let mut queue: LazyPriorityQueue<usize, Reverse<IntVal>> = LazyPriorityQueue::new();
+		let mut queue: LazyPriorityQueue<
+			usize,
+			Reverse<IntVal>,
+		> = LazyPriorityQueue::new();
 		let _ = queue.push(src, Reverse(0));
 		while let Some((u, Reverse(d_u))) = queue.pop() {
 			if d_u > dist_src[u] {
@@ -1773,7 +1846,10 @@ pub(crate) fn simplify_unify(
 	for src in 0..n {
 		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
 		dist_src[src] = 0;
-		let mut queue: LazyPriorityQueue<usize, Reverse<IntVal>> = LazyPriorityQueue::new();
+		let mut queue: LazyPriorityQueue<
+			usize,
+			Reverse<IntVal>,
+		> = LazyPriorityQueue::new();
 		let _ = queue.push(src, Reverse(0));
 		while let Some((u, Reverse(d_u))) = queue.pop() {
 			if d_u > dist_src[u] {
@@ -1918,11 +1994,7 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((
-					Valuation::val(&sx, sol),
-					Valuation::val(&sy, sol),
-					Valuation::val(&sz, sol),
-				));
+				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sz, sol)));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -1957,11 +2029,7 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((
-					Valuation::val(&sx, sol),
-					Valuation::val(&sy, sol),
-					Valuation::val(&sb, sol),
-				));
+				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sb, sol)));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -1995,11 +2063,7 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((
-					Valuation::val(&sx, sol),
-					Valuation::val(&sy, sol),
-					Valuation::val(&sb, sol),
-				));
+				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sb, sol)));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -2193,6 +2257,91 @@ mod tests {
 		let rx = model2.resolve_alias(x);
 		let ry = model2.resolve_alias(y);
 		assert_eq!(rx, ry, "equality cycle should unify x and y");
+	}
+
+	#[test]
+	fn slice2_lifts_min_through_chain() {
+		// Edges represent  x − y ≤ 0  (i.e. x ≤ y) and  y − z ≤ 0  (y
+		// ≤ z). With x.min = 5 we expect y.min and z.min to be lifted
+		// to 5 via the `edge.y.min ≥ edge.x.min − edge.d` direction.
+		use crate::actions::IntInspectionActions;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(5..=10);
+		let y = model.new_int_decision(0..=10);
+		let z = model.new_int_decision(0..=10);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(x, y, 0))
+		);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(y, z, 0))
+		);
+
+		let raw = model.diff_logic.take_constraints();
+		let edges = expand_collection(&mut model, raw).unwrap();
+		let edges = simplify_cycle_detection(&model, edges).unwrap();
+		let _ = simplify_bound_tightening(&mut model, edges).unwrap();
+
+		assert_eq!(y.min(&model), 5, "y.min should be lifted to x.min");
+		assert_eq!(z.min(&model), 5, "z.min should be lifted via chain");
+	}
+
+	#[test]
+	fn slice2_tightens_max_through_chain() {
+		// Edges represent  x − y ≤ 0  (x ≤ y) and  y − z ≤ 0  (y ≤ z).
+		// With z.max = 4 we expect y.max and x.max to be lowered to 4
+		// via the `edge.x.max ≤ edge.y.max + edge.d` direction.
+		use crate::actions::IntInspectionActions;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let z = model.new_int_decision(0..=4);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(x, y, 0))
+		);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(y, z, 0))
+		);
+
+		let raw = model.diff_logic.take_constraints();
+		let edges = expand_collection(&mut model, raw).unwrap();
+		let edges = simplify_cycle_detection(&model, edges).unwrap();
+		let _ = simplify_bound_tightening(&mut model, edges).unwrap();
+
+		assert_eq!(y.max(&model), 4, "y.max should drop to z.max");
+		assert_eq!(x.max(&model), 4, "x.max should drop via chain");
+	}
+
+	#[test]
+	fn slice2_returns_conflict_when_domain_empties() {
+		// Force a constraint chain whose graph-implied tightening
+		// empties a domain. e.g. x ∈ [0..3], y ∈ [10..20], edge `y − x
+		// ≤ 0` (y ≤ x) forces y.max ≤ 3 — but y.min = 10 > 3, so
+		// tightening empties y.
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=3);
+		let y = model.new_int_decision(10..=20);
+		assert!(
+			model
+				.diff_logic
+				.add(DifferenceLogicConstraint::Global(y, x, 0))
+		);
+
+		use crate::solver::Solver;
+		let result: Result<(Solver, _), _> = model.lower().to_solver();
+		assert!(
+			result.is_err(),
+			"Slice 2 should surface an unsat as LoweringError"
+		);
 	}
 
 	#[test]

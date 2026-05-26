@@ -34,7 +34,8 @@ use crate::{
 		BoxedPropagator, Conflict, Constraint, ReasonBuilder,
 		bool_array_element::BoolDecisionArrayElement,
 		difference_logic::{
-			expand_collection, simplify_cycle_detection, simplify_johnson_pruning, simplify_unify,
+			expand_collection, simplify_bound_tightening, simplify_cycle_detection,
+			simplify_johnson_pruning, simplify_unify,
 		},
 		int_array_element::{IntArrayElementBounds, IntValArrayElement},
 		int_table::IntTable,
@@ -409,6 +410,7 @@ impl LowererComplete<&mut Model> {
 			let raw = model.diff_logic.take_constraints();
 			let edges = expand_collection(model, raw).map_err(LoweringError::from)?;
 			let edges = simplify_cycle_detection(model, edges).map_err(LoweringError::from)?;
+			let edges = simplify_bound_tightening(model, edges).map_err(LoweringError::from)?;
 			let edges = simplify_johnson_pruning(model, edges);
 			let edges = simplify_unify(model, edges).map_err(LoweringError::from)?;
 			Some(edges)
