@@ -3,7 +3,6 @@
 
 pub(crate) mod decision;
 pub mod deserialize;
-pub mod diff_logic;
 pub mod expressions;
 mod initilization_context;
 pub(crate) mod resolved;
@@ -33,7 +32,7 @@ use crate::{
 	},
 	constraints::{
 		BoxedConstraint, Conflict, Constraint, DeferredReason, Reason, ReasonBuilder,
-		SimplificationStatus,
+		SimplificationStatus, difference_logic::DifferenceLogicCollection,
 	},
 	helpers::bytes::Bytes,
 	lower::{Lowerer, LowererComplete},
@@ -137,17 +136,15 @@ pub struct Model {
 	/// Definitions of the advisors that are listening to selected changes.
 	advisors: Vec<Advisor>,
 
-	/// Collection of raw difference logic constraints. Populated via
-	/// [`diff_logic::DifferenceLogicCollection::add`] and drained at
-	/// lowering time by the pipeline in [`crate::lower`].
-	pub(crate) diff_logic: diff_logic::DifferenceLogicCollection,
+	/// Collection of raw difference logic constraints.
+	pub(crate) diff_logic: DifferenceLogicCollection,
 }
 
 impl Model {
 	/// Follow any aliasing chain on the given integer view, returning a
 	/// view that no longer references aliases. Useful after
-	/// [`diff_logic::simplify_unify`] has collapsed equivalent variables
-	/// onto a single representative.
+	/// [`crate::constraints::difference_logic::simplify_unify`] has
+	/// collapsed equivalent variables onto a single representative.
 	pub fn resolve_alias(&self, view: View<IntVal>) -> View<IntVal> {
 		view.resolve_alias(self).into_inner()
 	}
@@ -178,8 +175,11 @@ impl Model {
 		reif: Option<crate::constraints::int_linear::Reification>,
 	) -> Option<Result<(), Conflict<View<bool>>>> {
 		use crate::{
-			constraints::int_linear::{LinComparator, Reification},
-			model::{diff_logic::DifferenceLogicConstraint as DLC, view::integer::IntView},
+			constraints::{
+				difference_logic::DifferenceLogicConstraint as DLC,
+				int_linear::{LinComparator, Reification},
+			},
+			model::view::integer::IntView,
 		};
 
 		if terms.len() != 2 {

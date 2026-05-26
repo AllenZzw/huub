@@ -278,6 +278,12 @@ pub struct Solver<Sat = Cadical> {
 	/// A reference to the [`Engine`] instance that is connected to
 	/// [`Self::sat`].
 	pub(crate) engine: Rc<RefCell<Engine>>,
+	/// Shared difference-logic graph. Always present; empty until
+	/// [`Self::add_diff_logic_edge`] is called. Cloned (`Rc::clone`) into
+	/// the [`crate::constraints::difference_logic::DifferenceLogicPropagator`]
+	/// when the first edge auto-registers it, and into future brancher /
+	/// lazy-literal-hook consumers.
+	pub(crate) diff_logic_graph: Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>>,
 }
 
 /// Structure capturing statistical information about the solver instance and
@@ -1033,31 +1039,28 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 	///
 	/// `gate` is reserved for the planned boolean-gated implication support
 	/// and must be `None` in this build; passing `Some(_)` panics.
-	/// Intern an integer endpoint into the engine-resident diff-logic
-	/// graph without registering an edge. Must be called for every
-	/// endpoint that will appear in a subsequent
-	/// [`Self::add_diff_logic_edge`] call so the per-node trailed lists
-	/// and algorithm buffers exist before the shell's `initialize`
-	/// subscribes advisors.
+	/// Intern an integer endpoint into the shared diff-logic graph
+	/// without registering an edge. Must be called for every endpoint
+	/// that will appear in a subsequent [`Self::add_diff_logic_edge`]
+	/// call so the per-node trailed lists and algorithm buffers exist
+	/// before the propagator's `initialize` subscribes advisors.
 	pub(crate) fn intern_diff_logic_int(&mut self, view: View<IntVal>) {
 		let mut handle = self.engine.borrow_mut();
-		let engine = &mut *handle;
-		let _ = engine
-			.state
-			.diff_logic
-			.intern_int(&mut engine.state.trail, view);
+		let _ = self
+			.diff_logic_graph
+			.borrow_mut()
+			.intern_int(&mut handle.state.trail, view);
 	}
 
-	/// Intern a gating Boolean into the engine-resident diff-logic graph
-	/// without registering an edge. Same rationale as
+	/// Intern a gating Boolean into the shared diff-logic graph without
+	/// registering an edge. Same rationale as
 	/// [`Self::intern_diff_logic_int`].
 	pub(crate) fn intern_diff_logic_bool(&mut self, view: View<bool>) {
 		let mut handle = self.engine.borrow_mut();
-		let engine = &mut *handle;
-		let _ = engine
-			.state
-			.diff_logic
-			.intern_bool(&mut engine.state.trail, view);
+		let _ = self
+			.diff_logic_graph
+			.borrow_mut()
+			.intern_bool(&mut handle.state.trail, view);
 	}
 
 	pub(crate) fn add_diff_logic_edge(
@@ -1067,37 +1070,23 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		d: IntVal,
 		gate: Option<View<bool>>,
 	) {
-		use crate::solver::engine::diff_logic::{
-			DifferenceLogicBooleansShell, DifferenceLogicBoundsShell,
-		};
+		use crate::constraints::difference_logic::DifferenceLogicPropagator;
 
-		let mut needs_register = false;
+		let needs_register;
 		{
 			let mut handle = self.engine.borrow_mut();
-			let engine = &mut *handle;
-			engine
-				.state
-				.diff_logic
-				.register_edge(&mut engine.state.trail, x, y, d, gate);
-			if !engine.state.diff_logic.propagators_registered {
-				engine.state.diff_logic.propagators_registered = true;
-				needs_register = true;
+			let mut graph = self.diff_logic_graph.borrow_mut();
+			let _ = graph.register_edge(&mut handle.state.trail, x, y, d, gate);
+			needs_register = !graph.propagator_registered;
+			if needs_register {
+				graph.propagator_registered = true;
 			}
 		}
 		if needs_register {
-			self.add_propagator(Box::new(DifferenceLogicBoundsShell), true);
-			let bounds_ref = {
-				let engine = self.engine.borrow();
-				PropRef::new(engine.propagators.len() - 1)
-			};
-			self.engine.borrow_mut().state.diff_logic.bounds_ref = Some(bounds_ref);
-
-			self.add_propagator(Box::new(DifferenceLogicBooleansShell), true);
-			let booleans_ref = {
-				let engine = self.engine.borrow();
-				PropRef::new(engine.propagators.len() - 1)
-			};
-			self.engine.borrow_mut().state.diff_logic.booleans_ref = Some(booleans_ref);
+			let prop = Box::new(DifferenceLogicPropagator {
+				graph: Rc::clone(&self.diff_logic_graph),
+			});
+			self.add_propagator(prop, true);
 		}
 	}
 
@@ -1427,7 +1416,14 @@ impl Clone for Solver<Cadical> {
 				sat.add_observed_var(var);
 			}
 		}
-		Solver { sat, engine }
+		// Deep-clone the diff-logic graph: the new solver owns its own
+		// independent state, sharing nothing with the original.
+		let diff_logic_graph = Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
+		Solver {
+			sat,
+			engine,
+			diff_logic_graph,
+		}
 	}
 }
 
@@ -1449,7 +1445,11 @@ impl<Sat: Default + ExternalPropagation + LearnCallback> Default for Solver<Sat>
 		let engine = Rc::default();
 		sat.set_learn_callback(Some(trace_learned_clause));
 		sat.connect_propagator(Rc::clone(&engine));
-		Self { sat, engine }
+		Self {
+			sat,
+			engine,
+			diff_logic_graph: Rc::new(RefCell::new(Default::default())),
+		}
 	}
 }
 

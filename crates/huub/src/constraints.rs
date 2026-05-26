@@ -2,6 +2,7 @@
 
 pub mod bool_array_element;
 pub mod cumulative;
+pub mod difference_logic;
 pub mod disjunctive;
 pub mod int_abs;
 pub mod int_array_element;
