@@ -2586,4 +2586,76 @@ mod tests {
 			"reverse gated edge missing in graph after lazy creation"
 		);
 	}
+
+	#[test]
+	fn cross_subsumption_auto_detected_and_branching() {
+		// Simulate the disjunctive-scheduling subsumption case: a
+		// user-supplied Reified diff-logic constraint posts
+		// `b_disj ↔ (x − y ≤ −1)` via `Model::try_route_diff_logic`
+		// (reached through `Model::linear`), and a brancher pair Boolean
+		// `b_branch ↔ (x − y ≤ −1)` is later allocated via
+		// `Model::diff_logic_branching`. Both target the same shape, so
+		// they should end up aliased to a single SAT literal after
+		// lowering.
+		use crate::solver::Solver;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+
+		// First, post a user-side Reified through the subsumption
+		// router. This becomes the canonical Boolean for (x, y, -1).
+		let b_disj = model.new_bool_decision();
+		model.add_diff_logic_reified(b_disj, xv, yv, -1);
+
+		// Then run `diff_logic_branching`, which calls
+		// `vars[i].diff_lit(self, vars[j], -1)` per pair. The lookup
+		// hits the cache and returns `b_disj`; no new Boolean is
+		// allocated.
+		let bool_count_before = model.bool_vars.len();
+		let _ = model.diff_logic_branching(vec![xv, yv]);
+		let bool_count_after = model.bool_vars.len();
+		assert_eq!(
+			bool_count_after, bool_count_before,
+			"diff_logic_branching should not allocate a new Boolean when a canonical exists"
+		);
+
+		// Sanity: the canonical b for (x, y, -1) is exactly b_disj.
+		let cached = model
+			.diff_lit_map
+			.get(&(xv, yv))
+			.and_then(|m| m.get(&-1))
+			.copied()
+			.expect("the cache must hold the canonical Boolean");
+		assert_eq!(cached, b_disj);
+
+		// End-to-end: lower and confirm the Boolean exists on the SAT
+		// side (this also verifies no conflict from chain-clause
+		// posting on a tiny example).
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let _sb = map.get(&mut slv, b_disj);
+
+		// Now post a SECOND auto-detected Reified for the same shape on
+		// a fresh model and verify the supplied b_2 is aliased onto
+		// b_1.
+		let mut model2 = diff_logic_enabled_model();
+		let x2 = model2.new_int_decision(0..=10);
+		let y2 = model2.new_int_decision(0..=10);
+		let xv2: crate::model::View<IntVal> = x2.into();
+		let yv2: crate::model::View<IntVal> = y2.into();
+		let b1 = model2.new_bool_decision();
+		let b2 = model2.new_bool_decision();
+		model2.add_diff_logic_reified(b1, xv2, yv2, -1);
+		// Second add must SUBSUME b2 onto b1 (no new Reified constraint
+		// pushed; b2 alias-resolves to b1).
+		model2.add_diff_logic_reified(b2, xv2, yv2, -1);
+		let (mut slv2, map2): (Solver, _) = model2.lower().to_solver().unwrap();
+		assert_eq!(
+			map2.get(&mut slv2, b1),
+			map2.get(&mut slv2, b2),
+			"subsumed Boolean must alias-resolve to the canonical"
+		);
+	}
 }

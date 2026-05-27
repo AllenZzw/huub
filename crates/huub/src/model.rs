@@ -274,10 +274,128 @@ impl Model {
 			_ => return None,
 		};
 		for c in constraints {
-			let ok = self.diff_logic.add(c);
-			debug_assert!(ok, "diff-logic level rejected accepted constraint");
+			match c {
+				DLC::Reified(b, x, y, d) => {
+					// Route through subsumption: if a canonical Boolean for
+					// (x, y, d) already exists (posted by a brancher pair or
+					// another auto-detected constraint), alias `b` onto it
+					// instead of adding a parallel Reified entry.
+					self.add_diff_logic_reified(b, x, y, d);
+				}
+				other => {
+					let ok = self.diff_logic.add(other);
+					debug_assert!(ok, "diff-logic level rejected accepted constraint");
+				}
+			}
 		}
 		Some(Ok(()))
+	}
+
+	/// Post a `Reified(b, x, y, d)` diff-logic constraint, routing
+	/// through the model-side subsumption cache.
+	///
+	/// If `diff_lit_map` already holds a canonical Boolean for
+	/// `(canonical_x, canonical_y, d)` (or its reverse-direction
+	/// equivalent at `(canonical_y, canonical_x, −d − 1)`), the
+	/// supplied `b` is aliased onto the canonical Boolean via
+	/// [`Model::unify`] and NO new Reified constraint is added.
+	/// Otherwise the supplied `b` becomes the new canonical: the
+	/// Reified is posted into `self.diff_logic`, the cache is
+	/// populated in BOTH directions, and order-encoding chain
+	/// implication clauses (`prev → b` and `b → next`) are posted to
+	/// immediate `d`-neighbours.
+	pub(crate) fn add_diff_logic_reified(
+		&mut self,
+		b: View<bool>,
+		x: View<IntVal>,
+		y: View<IntVal>,
+		d: IntVal,
+	) {
+		let x = self.resolve_alias(x);
+		let y = self.resolve_alias(y);
+
+		// Forward exact hit: alias b onto the canonical.
+		if let Some(&canonical) = self.diff_lit_map.get(&(x, y)).and_then(|m| m.get(&d)) {
+			let _ = b
+				.resolve_alias(self)
+				.unify(self, canonical.resolve_alias(self));
+			return;
+		}
+		// Reverse exact hit:  (x − y ≤ d)  ≡  ¬(y − x ≤ −d − 1).
+		if let Some(&canonical) = self
+			.diff_lit_map
+			.get(&(y, x))
+			.and_then(|m| m.get(&(-d - 1)))
+		{
+			let _ = b
+				.resolve_alias(self)
+				.unify(self, (!canonical).resolve_alias(self));
+			return;
+		}
+
+		// Cache miss: `b` becomes the new canonical.
+		self.diff_lit_insert(b, x, y, d);
+	}
+
+	/// Insert a freshly-canonical Reified Boolean into the diff-logic
+	/// pipeline: post the underlying `Reified(b, x, y, d)`, populate
+	/// `diff_lit_map` in both directions, and emit order-encoding
+	/// chain clauses against immediate `d` neighbours. Assumes
+	/// `(x, y, d)` is NOT already in the cache (the lookup is the
+	/// caller's responsibility) and that `x, y` are already
+	/// canonical (alias-resolved).
+	pub(crate) fn diff_lit_insert(
+		&mut self,
+		b: View<bool>,
+		x: View<IntVal>,
+		y: View<IntVal>,
+		d: IntVal,
+	) {
+		use crate::{
+			constraints::difference_logic::DifferenceLogicConstraint,
+			model::expressions::bool_formula::BoolFormula,
+		};
+
+		// Probe forward-direction chain neighbours BEFORE mutating the map.
+		let prev = self
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range(..d).next_back().map(|(_, &b)| b));
+		let next = self
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range((d + 1)..).next().map(|(_, &b)| b));
+
+		// Post Reified constraint.
+		let _ = self
+			.diff_logic
+			.add(DifferenceLogicConstraint::Reified(b, x, y, d));
+
+		// Populate cache in both directions.
+		let _ = self.diff_lit_map.entry((x, y)).or_default().insert(d, b);
+		let _ = self
+			.diff_lit_map
+			.entry((y, x))
+			.or_default()
+			.insert(-d - 1, !b);
+
+		// Chain clauses.
+		if let Some(bp) = prev {
+			let _ = self
+				.proposition(BoolFormula::Implies(
+					BoolFormula::Atom(bp).into(),
+					BoolFormula::Atom(b).into(),
+				))
+				.post();
+		}
+		if let Some(bn) = next {
+			let _ = self
+				.proposition(BoolFormula::Implies(
+					BoolFormula::Atom(b).into(),
+					BoolFormula::Atom(bn).into(),
+				))
+				.post();
+		}
 	}
 }
 
