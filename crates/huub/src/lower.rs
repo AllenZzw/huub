@@ -528,6 +528,28 @@ impl LowererComplete<&mut Model> {
 			}
 		}
 
+		// Translate model-side `diff_lit_map` into the engine-side
+		// `engine::State.diff_lit_map`, mapping each view through the
+		// `LoweringMap`. Lets brancher / propagator code resolve
+		// `(x, y, d) → b` in O(log d) on the solver side without
+		// re-scanning graph edges.
+		let model_diff_lit_map = std::mem::take(&mut model.diff_lit_map);
+		for ((x_m, y_m), chain) in model_diff_lit_map {
+			let x_s = map.get(&mut slv, x_m);
+			let y_s = map.get(&mut slv, y_m);
+			for (d, b_m) in chain {
+				let b_s = map.get(&mut slv, b_m);
+				let _ = slv
+					.engine
+					.borrow_mut()
+					.state
+					.diff_lit_map
+					.entry((x_s, y_s))
+					.or_default()
+					.insert(d, b_s);
+			}
+		}
+
 		Ok((slv, map))
 	}
 }
@@ -1053,6 +1075,15 @@ impl IntDecisionActions<LoweringContext<'_>> for solver::Decision<IntVal> {
 	fn lit(&self, ctx: &mut LoweringContext<'_>, meaning: IntLitMeaning) -> solver::View<bool> {
 		ctx.slv.int_lit(*self, meaning)
 	}
+
+	fn diff_lit(
+		&self,
+		_ctx: &mut LoweringContext<'_>,
+		_other: Self,
+		_d: IntVal,
+	) -> solver::View<bool> {
+		unimplemented!("diff_lit during lowering: use Model::diff_lit on the model side instead")
+	}
 }
 
 impl IntDecisionActions<dyn LoweringActions + '_> for solver::Decision<IntVal> {
@@ -1062,6 +1093,15 @@ impl IntDecisionActions<dyn LoweringActions + '_> for solver::Decision<IntVal> {
 		meaning: IntLitMeaning,
 	) -> solver::View<bool> {
 		ctx.int_lit(*self, meaning)
+	}
+
+	fn diff_lit(
+		&self,
+		_ctx: &mut (dyn LoweringActions + '_),
+		_other: Self,
+		_d: IntVal,
+	) -> solver::View<bool> {
+		unimplemented!("diff_lit on dyn LoweringActions: use Model::diff_lit on the model side")
 	}
 }
 

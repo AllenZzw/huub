@@ -15,33 +15,31 @@
 //! ## Architecture
 //!
 //! - [`DiffLogicState`] lives on the [`crate::solver::Solver`] inside an
-//!   `Rc<RefCell<…>>`. It owns the master edge list, the per-node
-//!   active-edge adjacency lists, the Johnson potential `pi`, and the
-//!   per-node bound shadow used for incremental Dijkstra.
+//!   `Rc<RefCell<…>>`. It owns the master edge list, the per-node active-edge
+//!   adjacency lists, the Johnson potential `pi`, and the per-node bound shadow
+//!   used for incremental Dijkstra.
 //! - [`DifferenceLogicPropagator`] holds an `Rc::clone` of the graph and
-//!   bridges the engine's `Propagator<Engine>` interface to the graph
-//!   methods (`propagate_bounds`, `propagate_booleans`, advisors,
-//!   reasons). One propagator runs both bound and Boolean phases in a
-//!   single `borrow_mut()` scope.
+//!   bridges the engine's `Propagator<Engine>` interface to the graph methods
+//!   (`propagate_bounds`, `propagate_booleans`, advisors, reasons). One
+//!   propagator runs both bound and Boolean phases in a single `borrow_mut()`
+//!   scope.
 //!
 //! ## Known limitations (fixed alongside `tighten_difference`)
 //!
-//! - **No mid-search endpoint introduction.** The propagator's
-//!   `initialize` fires once, when the first
-//!   [`crate::solver::Solver::add_diff_logic_edge`] auto-posts the
-//!   propagator. Lowering pre-interns every endpoint via
+//! - **No mid-search endpoint introduction.** The propagator's `initialize`
+//!   fires once, when the first [`crate::solver::Solver::add_diff_logic_edge`]
+//!   auto-posts the propagator. Lowering pre-interns every endpoint via
 //!   [`crate::solver::Solver::intern_diff_logic_int`] /
 //!   [`crate::solver::Solver::intern_diff_logic_bool`] before any edge is
 //!   registered, so every lowering-time endpoint gets an advisor. But
-//!   `tighten_difference` (future work) would assert a brand-new
-//!   `x − y ≤ d` mid-search — possibly with endpoints not previously in
-//!   the graph. Those late endpoints would be interned by `register_edge`
-//!   but would have no bounds advisor, so subsequent bound changes on
-//!   them would not wake the propagator. The fix is a
-//!   `subscribe_int_bounds_advisor` helper on
-//!   [`crate::solver::Solver`] (~15 lines) that synthesizes the advisor
-//!   entry without needing an `InitializationContext`; it lands together
-//!   with `tighten_difference`.
+//!   `tighten_difference` (future work) would assert a brand-new `x − y ≤ d`
+//!   mid-search — possibly with endpoints not previously in the graph. Those
+//!   late endpoints would be interned by `register_edge` but would have no
+//!   bounds advisor, so subsequent bound changes on them would not wake the
+//!   propagator. The fix is a `subscribe_int_bounds_advisor` helper on
+//!   [`crate::solver::Solver`] (~15 lines) that synthesizes the advisor entry
+//!   without needing an `InitializationContext`; it lands together with
+//!   `tighten_difference`.
 
 use std::{cell::RefCell, cmp::Reverse, mem, rc::Rc};
 
@@ -1188,17 +1186,42 @@ pub enum DifferenceLogicConstraint {
 	/// A globally active difference constraint `x − y ≤ d`.
 	Global(ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// An implied difference constraint `b → (x − y ≤ d)`.
-	Implied(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
+	Implied(
+		ModelView<bool>,
+		ModelView<IntVal>,
+		ModelView<IntVal>,
+		IntVal,
+	),
 	/// A reified difference constraint `b ↔ (x − y ≤ d)`.
-	Reified(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
+	Reified(
+		ModelView<bool>,
+		ModelView<IntVal>,
+		ModelView<IntVal>,
+		IntVal,
+	),
 	/// An implied equality `b → (x − y == d)`.
-	ImpliedEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
+	ImpliedEquals(
+		ModelView<bool>,
+		ModelView<IntVal>,
+		ModelView<IntVal>,
+		IntVal,
+	),
 	/// A disequality `x − y ≠ d`.
 	NotEquals(ModelView<IntVal>, ModelView<IntVal>, IntVal),
 	/// An implied disequality `b → (x − y ≠ d)`.
-	ImpliedNotEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
+	ImpliedNotEquals(
+		ModelView<bool>,
+		ModelView<IntVal>,
+		ModelView<IntVal>,
+		IntVal,
+	),
 	/// A reified equality `b ↔ (x − y == d)`.
-	ReifiedEquals(ModelView<bool>, ModelView<IntVal>, ModelView<IntVal>, IntVal),
+	ReifiedEquals(
+		ModelView<bool>,
+		ModelView<IntVal>,
+		ModelView<IntVal>,
+		IntVal,
+	),
 }
 
 /// User-tunable knobs for difference-logic processing.
@@ -1646,7 +1669,10 @@ pub(crate) fn simplify_bound_tightening(
 ///
 /// Returns the surviving edges. No-op when `parameters().simplify` is
 /// false.
-pub(crate) fn simplify_johnson_pruning(model: &Model, edges: Vec<ModelDiffEdge>) -> Vec<ModelDiffEdge> {
+pub(crate) fn simplify_johnson_pruning(
+	model: &Model,
+	edges: Vec<ModelDiffEdge>,
+) -> Vec<ModelDiffEdge> {
 	if !model.diff_logic.parameters.simplify {
 		return edges;
 	}
@@ -1713,10 +1739,7 @@ pub(crate) fn simplify_johnson_pruning(model: &Model, edges: Vec<ModelDiffEdge>)
 	for src in 0..n {
 		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
 		dist_src[src] = 0;
-		let mut queue: LazyPriorityQueue<
-			usize,
-			Reverse<IntVal>,
-		> = LazyPriorityQueue::new();
+		let mut queue: LazyPriorityQueue<usize, Reverse<IntVal>> = LazyPriorityQueue::new();
 		let _ = queue.push(src, Reverse(0));
 		while let Some((u, Reverse(d_u))) = queue.pop() {
 			if d_u > dist_src[u] {
@@ -1846,10 +1869,7 @@ pub(crate) fn simplify_unify(
 	for src in 0..n {
 		let mut dist_src: Vec<IntVal> = vec![IntVal::MAX; n];
 		dist_src[src] = 0;
-		let mut queue: LazyPriorityQueue<
-			usize,
-			Reverse<IntVal>,
-		> = LazyPriorityQueue::new();
+		let mut queue: LazyPriorityQueue<usize, Reverse<IntVal>> = LazyPriorityQueue::new();
 		let _ = queue.push(src, Reverse(0));
 		while let Some((u, Reverse(d_u))) = queue.pop() {
 			if d_u > dist_src[u] {
@@ -1994,7 +2014,11 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sz, sol)));
+				captured = Some((
+					Valuation::val(&sx, sol),
+					Valuation::val(&sy, sol),
+					Valuation::val(&sz, sol),
+				));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -2029,7 +2053,11 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sb, sol)));
+				captured = Some((
+					Valuation::val(&sx, sol),
+					Valuation::val(&sy, sol),
+					Valuation::val(&sb, sol),
+				));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -2063,7 +2091,11 @@ mod tests {
 		let status = slv
 			.solve()
 			.on_solution(|sol| {
-				captured = Some((Valuation::val(&sx, sol), Valuation::val(&sy, sol), Valuation::val(&sb, sol)));
+				captured = Some((
+					Valuation::val(&sx, sol),
+					Valuation::val(&sy, sol),
+					Valuation::val(&sb, sol),
+				));
 			})
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
@@ -2406,5 +2438,71 @@ mod tests {
 			.satisfy();
 		assert_eq!(status, Status::Satisfied);
 		let _ = captured.expect("Satisfied implies a solution was reported");
+	}
+
+	#[test]
+	fn diff_lit_subsumption_collapses_two_calls() {
+		// Two `diff_lit(x, y, -1)` calls on the same model should
+		// return the same `View<bool>` — the second call hits the
+		// chain map and reuses the canonical Boolean allocated by the
+		// first.
+		use crate::actions::IntDecisionActions;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+
+		let b1 = xv.diff_lit(&mut model, yv, -1);
+		let b2 = xv.diff_lit(&mut model, yv, -1);
+		assert_eq!(b1, b2, "second diff_lit call must reuse canonical Boolean");
+	}
+
+	#[test]
+	fn diff_lit_reverse_direction_hit_returns_negation() {
+		// `(x − y ≤ d)` is logically equivalent to `¬(y − x ≤ −d − 1)`.
+		// After posting `x.diff_lit(y, 3)` the cache should report
+		// `y.diff_lit(x, -4) == !b`.
+		use crate::actions::IntDecisionActions;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+
+		let b = xv.diff_lit(&mut model, yv, 3);
+		let b_rev = yv.diff_lit(&mut model, xv, -4);
+		assert_eq!(
+			b_rev, !b,
+			"reverse-direction diff_lit must return the negation of the forward Boolean"
+		);
+	}
+
+	#[test]
+	fn diff_logic_branching_internal_subsumption() {
+		// `diff_logic_branching` for [x, y, z] posts three pairwise
+		// Reified Booleans. A subsequent `diff_lit(x, y, -1)` call
+		// should hit the cache and return the same Boolean the
+		// brancher allocated.
+		use crate::actions::IntDecisionActions;
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let z = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+		let _branching = model.diff_logic_branching(vec![xv, yv, z.into()]);
+
+		let b_again = xv.diff_lit(&mut model, yv, -1);
+		let cached = model
+			.diff_lit_map
+			.get(&(xv, yv))
+			.and_then(|m| m.get(&-1))
+			.copied()
+			.expect("diff_logic_branching should have populated the (x, y, -1) entry");
+		assert_eq!(b_again, cached);
 	}
 }

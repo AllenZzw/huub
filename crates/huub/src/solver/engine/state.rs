@@ -1,6 +1,6 @@
 //! Internal state representation of the propagation engine.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 
 use pindakaas::{Lit as RawLit, Var as RawVar};
 use rustc_hash::FxHashMap;
@@ -19,6 +19,7 @@ use crate::{
 		engine::{AdvisorDef, Engine, LitPropagation, PropRef},
 		queue::PropagatorQueue,
 		trail::Trail,
+		view::View,
 	},
 };
 
@@ -61,6 +62,12 @@ pub struct State {
 	pub(crate) int_vars: Vec<IntDecision>,
 	/// Mapping from boolean variables to integer variables.
 	pub(crate) bool_to_int: BoolToIntMap,
+	/// Per `(x_view, y_view)` ordered chain of Reified Booleans for
+	/// `x − y ≤ d` constraints. Populated at lowering time from
+	/// `Model::diff_lit_map` via the `LoweringMap`; extended mid-search
+	/// by `DiffLogicActions::diff_lit` calls. Cached in BOTH directions:
+	/// `(x, y, d) → b` and `(y, x, −d − 1) → !b`.
+	pub(crate) diff_lit_map: FxHashMap<(View<IntVal>, View<IntVal>), BTreeMap<IntVal, View<bool>>>,
 	/// Trailed storage, including lower and upper bounds for integer variables
 	/// and Boolean variable assignments.
 	pub(crate) trail: Trail,

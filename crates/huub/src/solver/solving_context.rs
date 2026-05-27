@@ -131,6 +131,41 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 		};
 		var.lit(meaning, new_var).0
 	}
+
+	/// Engine-side diff-logic literal lookup. Cache (populated at
+	/// lowering time from `Model::diff_lit_map` and extended on demand
+	/// once mid-search edge registration is wired up) is keyed by
+	/// solver-side `View<IntVal>` ordered pair with an inner
+	/// `BTreeMap<IntVal, View<bool>>` chain.
+	///
+	/// On a cache miss this implementation panics. Mid-search lazy edge
+	/// creation needs (a) graph-mutation access from `SolvingContext`
+	/// and (b) `subscribe_int_bounds_advisor` to register advisors on
+	/// newly-introduced endpoints; both are deferred to the future
+	/// `tighten_difference` PR. Until then, callers must ensure every
+	/// `(x, y, d)` they request was allocated at lowering time via
+	/// `Model::diff_lit` or `Model::diff_logic_branching`.
+	fn diff_lit(&self, ctx: &mut SolvingContext<'_>, other: Self, d: IntVal) -> View<bool> {
+		let x: View<IntVal> = (*self).into();
+		let y: View<IntVal> = other.into();
+		if let Some(b) = ctx.state.diff_lit_map.get(&(x, y)).and_then(|m| m.get(&d)) {
+			return *b;
+		}
+		if let Some(b) = ctx
+			.state
+			.diff_lit_map
+			.get(&(y, x))
+			.and_then(|m| m.get(&(-d - 1)))
+		{
+			return !*b;
+		}
+		panic!(
+			"IntDecisionActions::diff_lit on SolvingContext: mid-search lazy edge creation is not \
+			 yet supported. The (x, y, d) entry must have been allocated at lowering time via \
+			 Model::diff_lit or Model::diff_logic_branching. On-demand allocation lands with the \
+			 tighten_difference infrastructure (advisor subscription + graph-mutation access)."
+		);
+	}
 }
 
 impl IntInspectionActions<SolvingContext<'_>> for Decision<IntVal> {

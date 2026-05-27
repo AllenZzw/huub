@@ -190,6 +190,12 @@ where
 			Err(b) => b.into(),
 		}
 	}
+
+	fn diff_lit(&self, _ctx: &mut Ctx, _other: Self, _d: IntVal) -> Ctx::Atom {
+		unimplemented!(
+			"diff_lit on LinearView: route through the outer View<IntVal> impl which folds offsets/scales"
+		)
+	}
 }
 
 impl<Ctx, Var> IntExplanationActions<Ctx> for LinearView<NonZero<IntVal>, IntVal, Var>

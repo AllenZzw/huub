@@ -67,10 +67,7 @@ impl DiffLogicBrancher {
 		}
 
 		let next = solver.new_trailed(0);
-		solver.push_brancher(Box::new(DiffLogicBrancher {
-			pair_bools,
-			next,
-		}));
+		solver.push_brancher(Box::new(DiffLogicBrancher { pair_bools, next }));
 	}
 }
 

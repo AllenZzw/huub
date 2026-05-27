@@ -170,6 +170,28 @@ where
 			IntView::Bool(lin) => lin.lit(ctx, meaning),
 		}
 	}
+
+	fn diff_lit(&self, ctx: &mut Ctx, other: Self, d: IntVal) -> Ctx::Atom {
+		// Diff-logic literals are only supported when both endpoints are
+		// unit-scaled `Linear` views (so the constraint reduces cleanly to
+		// `var_a − var_b ≤ d′` after folding offsets into `d`). Mixed cases
+		// and non-unit scales would each require a separate canonical form.
+		match (self.0, other.0) {
+			(IntView::Linear(lin_a), IntView::Linear(lin_b))
+				if lin_a.scale.get() == 1 && lin_b.scale.get() == 1 =>
+			{
+				let d_folded = d - lin_a.offset + lin_b.offset;
+				lin_a.var.diff_lit(ctx, lin_b.var, d_folded)
+			}
+			_ => unimplemented!(
+				"diff_lit on solver View<IntVal>: only unit-scaled Linear×Linear pairs are \
+				 supported; got {:?} − {:?} ≤ {}",
+				self.0,
+				other.0,
+				d
+			),
+		}
+	}
 }
 
 impl<Ctx> IntExplanationActions<Ctx> for View<IntVal>

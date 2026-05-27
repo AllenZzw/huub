@@ -118,6 +118,15 @@ where
 	fn lit(&self, ctx: &mut Ctx, meaning: IntLitMeaning) -> Ctx::Atom {
 		self.var.lit(ctx, self.reverse_meaning(meaning))
 	}
+
+	fn diff_lit(&self, ctx: &mut Ctx, other: Self, d: IntVal) -> Ctx::Atom
+	where
+		Self: Sized,
+	{
+		// (var_a + off_a) − (var_b + off_b) ≤ d  ⇔  var_a − var_b ≤ d − off_a + off_b
+		self.var
+			.diff_lit(ctx, other.var, d - self.offset + other.offset)
+	}
 }
 
 impl<Ctx, Var> IntExplanationActions<Ctx> for OffsetView<IntVal, Var>

@@ -9,6 +9,7 @@ pub(crate) mod resolved;
 pub(crate) mod view;
 
 use std::{
+	collections::BTreeMap,
 	fmt::Debug,
 	hash::Hash,
 	iter::{repeat_n, repeat_with},
@@ -138,6 +139,15 @@ pub struct Model {
 
 	/// Collection of raw difference logic constraints.
 	pub(crate) diff_logic: DifferenceLogicCollection,
+
+	/// Per `(canonical_x, canonical_y)` ordered chain of Reified
+	/// Booleans for `x − y ≤ d` constraints. Keys are model-side
+	/// `View<IntVal>` after `resolve_alias`. Populated by
+	/// `View<IntVal>::diff_lit` and the `Reified` arm of
+	/// `Model::add_diff_logic_constraint`; consulted for subsumption +
+	/// order-encoding chain-clause posting. The cache stores BOTH
+	/// directions: `(x, y, d) → b` and `(y, x, −d − 1) → !b`.
+	pub(crate) diff_lit_map: FxHashMap<(View<IntVal>, View<IntVal>), BTreeMap<IntVal, View<bool>>>,
 }
 
 impl Model {
@@ -480,27 +490,22 @@ impl Model {
 	/// lowering — `to_solver` recovers the pair Booleans by looking up
 	/// the gated edges this method posted.
 	///
-	/// Note: this method does NOT detect when an existing diff-logic
-	/// constraint already encodes one of the `x_i < x_j` orderings (e.g.
-	/// a disjunctive constraint). Such subsumption simplification is
-	/// future work; the brancher is sound but may create logically
-	/// redundant Booleans in the meantime.
-	pub fn diff_logic_branching(
-		&mut self,
-		vars: Vec<View<IntVal>>,
-	) -> deserialize::Branching {
-		use crate::{
-			constraints::difference_logic::DifferenceLogicConstraint,
-			model::deserialize,
-		};
+	/// Subsumption: if `b_{ij}` is logically equivalent to an existing
+	/// diff-logic gate (e.g. one posted by a disjunctive constraint),
+	/// the call to `View<IntVal>::diff_lit` aliases the new Boolean
+	/// onto the canonical one and emits no new SAT variable. Chain
+	/// implication clauses are posted between order-encoding neighbours
+	/// at insertion time.
+	pub fn diff_logic_branching(&mut self, vars: Vec<View<IntVal>>) -> deserialize::Branching {
+		use crate::{actions::IntDecisionActions, model::deserialize};
 
 		let n = vars.len();
 		for i in 0..n {
 			for j in (i + 1)..n {
-				let b = self.new_bool_decision();
-				let _ = self
-					.diff_logic
-					.add(DifferenceLogicConstraint::Reified(b, vars[i], vars[j], -1));
+				// diff_lit posts the Reified constraint *and* checks
+				// the chain map, aliasing onto any existing canonical
+				// Boolean.
+				let _ = vars[i].diff_lit(self, vars[j], -1);
 			}
 		}
 		deserialize::Branching::DiffLogic(vars)

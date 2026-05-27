@@ -110,32 +110,14 @@ impl Branching {
 				let n = solver_vars.len();
 				let mut pair_bools = Vec::with_capacity(n * n.saturating_sub(1) / 2);
 				{
-					let graph = slv.diff_logic_graph().borrow();
+					let engine = slv.engine.borrow();
 					for i in 0..n {
-						let Some(&from) = graph.int_var_to_node.get(&solver_vars[i]) else {
-							panic!(
-								"Branching::DiffLogic: var {} not interned in diff-logic graph; \
-								 did you call Model::diff_logic_branching to post the pair Reified \
-								 constraints?",
-								i
-							);
-						};
 						for j in (i + 1)..n {
-							let Some(&to) = graph.int_var_to_node.get(&solver_vars[j]) else {
-								panic!(
-									"Branching::DiffLogic: var {} not interned in diff-logic graph",
-									j
-								);
-							};
-							let gate = graph
-								.edges
-								.iter()
-								.find(|e| {
-									e.from == from
-										&& e.to == to && e.val == -1
-										&& e.bool_var.is_some()
-								})
-								.map(|e| graph.bool_vars[e.bool_var.unwrap()])
+							let gate = engine
+								.state
+								.diff_lit_map
+								.get(&(solver_vars[i], solver_vars[j]))
+								.and_then(|chain| chain.get(&-1).copied())
 								.expect(
 									"Branching::DiffLogic constructed without prior \
 									 diff_logic_branching post for this pair",

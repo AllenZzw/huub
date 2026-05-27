@@ -243,6 +243,12 @@ impl<Sat: ExternalPropagation> IntDecisionActions<Solver<Sat>> for Decision<IntV
 		let mut ctx = SolvingContext::new(&mut actions, &mut engine.state);
 		IntDecisionActions::val_lit(self, &mut ctx)
 	}
+
+	fn diff_lit(&self, ctx: &mut Solver<Sat>, other: Self, d: IntVal) -> View<bool> {
+		let (mut actions, mut engine) = ctx.as_parts_mut();
+		let mut ctx = SolvingContext::new(&mut actions, &mut engine.state);
+		self.diff_lit(&mut ctx, other, d)
+	}
 }
 
 impl IntExplanationActions<State> for Decision<IntVal> {

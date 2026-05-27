@@ -60,6 +60,14 @@ impl IntDecisionActions<Model> for Decision<IntVal> {
 	fn val_lit(&self, ctx: &mut Model) -> Option<View<bool>> {
 		self.resolve_alias(ctx).val_lit(ctx)
 	}
+
+	fn diff_lit(&self, ctx: &mut Model, other: Self, d: IntVal) -> View<bool> {
+		// Resolve both endpoints through any alias chains, then delegate to
+		// the `View<IntVal>` impl which hosts the model-side `diff_lit_map`.
+		let x = self.resolve_alias(ctx).into_inner();
+		let y = other.resolve_alias(ctx).into_inner();
+		x.diff_lit(ctx, y, d)
+	}
 }
 
 impl IntInspectionActions<Model> for Decision<IntVal> {
@@ -464,6 +472,13 @@ impl IntDecisionActions<Model> for Resolved<Decision<IntVal>> {
 	fn val_lit(&self, ctx: &mut Model) -> Option<View<bool>> {
 		let val = self.val(ctx)?;
 		Some(View(BoolView::IntEq(self.0, val)))
+	}
+
+	fn diff_lit(&self, ctx: &mut Model, other: Self, d: IntVal) -> View<bool> {
+		// Wrap the resolved Decisions in `View<IntVal>` and delegate.
+		let x: View<IntVal> = self.0.into();
+		let y: View<IntVal> = other.0.into();
+		x.diff_lit(ctx, y, d)
 	}
 }
 

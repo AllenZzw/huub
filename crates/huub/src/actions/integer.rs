@@ -32,6 +32,24 @@ where
 		let val = self.val(ctx)?;
 		Some(self.lit(ctx, IntLitMeaning::Eq(val)))
 	}
+
+	/// Get (or create) the Reified Boolean literal `b ↔ (self − other ≤ d)`.
+	///
+	/// Binary analogue of [`Self::lit`]. On a cache hit returns the
+	/// canonical Boolean for the `(self, other, d)` shape. On a miss
+	/// the implementation allocates a fresh Boolean, posts the
+	/// corresponding gated edges (and/or the model-stage `Reified`
+	/// constraint), inserts the chain entry in BOTH directions
+	/// (`(x, y, d) → b` and `(y, x, −d − 1) → !b`), and posts
+	/// order-encoding chain implication clauses to immediate
+	/// `d`-neighbours so the SAT solver propagates `b_i → b_j`
+	/// whenever `d_i ≤ d_j`.
+	///
+	/// Implementations on contexts / wrapper views that don't host a
+	/// diff-logic literal store should `unimplemented!`.
+	fn diff_lit(&self, ctx: &mut Context, other: Self, d: IntVal) -> Context::Atom
+	where
+		Self: Sized;
 }
 
 /// Change that has occurred in the domain of an integer variable.
@@ -231,6 +249,11 @@ where
 {
 	fn lit(&self, ctx: &mut Ctx, meaning: IntLitMeaning) -> Ctx::Atom {
 		self.try_lit(ctx, meaning).unwrap()
+	}
+
+	fn diff_lit(&self, _ctx: &mut Ctx, other: Self, d: IntVal) -> Ctx::Atom {
+		// Both endpoints are constants: `a − b ≤ d` is statically true or false.
+		Ctx::Atom::from(*self - other <= d)
 	}
 }
 

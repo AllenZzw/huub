@@ -13,7 +13,9 @@ use crate::{
 		BoolPropagationActions, IntDecisionActions, IntExplanationActions, IntInspectionActions,
 		IntPropagationActions, IntSimplificationActions, PropagationActions, ReasoningContext,
 	},
-	constraints::{Conflict, ReasonBuilder, int_linear::IntEq},
+	constraints::{
+		Conflict, ReasonBuilder, difference_logic::DifferenceLogicConstraint, int_linear::IntEq,
+	},
 	model::{
 		Decision, Model, View,
 		expressions::linear::IntLinearExp,
@@ -266,6 +268,11 @@ impl IntDecisionActions<Model> for Resolved<View<IntVal>> {
 	fn val_lit(&self, ctx: &mut Model) -> Option<View<bool>> {
 		let val = self.val(ctx)?;
 		Some(IntInspectionActions::try_lit(self, ctx, IntLitMeaning::Eq(val)).unwrap())
+	}
+
+	fn diff_lit(&self, ctx: &mut Model, other: Self, d: IntVal) -> View<bool> {
+		// Already resolved — unwrap and delegate to the View impl.
+		self.0.diff_lit(ctx, other.0, d)
 	}
 }
 
@@ -629,6 +636,66 @@ impl IntDecisionActions<Model> for View<IntVal> {
 
 	fn val_lit(&self, ctx: &mut Model) -> Option<View<bool>> {
 		self.resolve_alias(ctx).val_lit(ctx)
+	}
+
+	fn diff_lit(&self, ctx: &mut Model, other: View<IntVal>, d: IntVal) -> View<bool> {
+		let x = self.resolve_alias(ctx).into_inner();
+		let y = other.resolve_alias(ctx).into_inner();
+
+		// 1. Exact forward hit.
+		if let Some(b) = ctx.diff_lit_map.get(&(x, y)).and_then(|m| m.get(&d)) {
+			return *b;
+		}
+		// 2. Exact reverse hit: (x − y ≤ d)  ≡  ¬(y − x ≤ −d − 1).
+		if let Some(b) = ctx.diff_lit_map.get(&(y, x)).and_then(|m| m.get(&(-d - 1))) {
+			return !*b;
+		}
+
+		// 3. Probe forward chain neighbours BEFORE allocating.
+		let prev = ctx
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range(..d).next_back().map(|(_, b)| *b));
+		let next = ctx
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range((d + 1)..).next().map(|(_, b)| *b));
+
+		// 4. Allocate fresh Boolean and post the Reified diff-logic constraint via the
+		//    raw (non-subsumption-routing) path.
+		let b = ctx.new_bool_decision().into();
+		let _ = ctx
+			.diff_logic
+			.add(DifferenceLogicConstraint::Reified(b, x, y, d));
+
+		// 5. Populate cache in both directions.
+		let _ = ctx.diff_lit_map.entry((x, y)).or_default().insert(d, b);
+		let _ = ctx
+			.diff_lit_map
+			.entry((y, x))
+			.or_default()
+			.insert(-d - 1, !b);
+
+		// 6. Chain clauses: prev → b   and   b → next.
+		use crate::model::expressions::bool_formula::BoolFormula;
+		if let Some(bp) = prev {
+			let _ = ctx
+				.proposition(BoolFormula::Implies(
+					BoolFormula::Atom(bp).into(),
+					BoolFormula::Atom(b).into(),
+				))
+				.post();
+		}
+		if let Some(bn) = next {
+			let _ = ctx
+				.proposition(BoolFormula::Implies(
+					BoolFormula::Atom(b).into(),
+					BoolFormula::Atom(bn).into(),
+				))
+				.post();
+		}
+
+		b
 	}
 }
 

@@ -183,6 +183,10 @@ where
 	fn lit(&self, ctx: &mut Ctx, meaning: IntLitMeaning) -> Ctx::Atom {
 		self.try_lit(ctx, meaning).unwrap()
 	}
+
+	fn diff_lit(&self, _ctx: &mut Ctx, _other: Self, _d: IntVal) -> Ctx::Atom {
+		unimplemented!("diff_lit on LinearBoolView: not supported — convert to View<IntVal> first")
+	}
 }
 
 impl<Ctx, Var> IntExplanationActions<Ctx> for LinearBoolView<NonZero<IntVal>, IntVal, Var>
