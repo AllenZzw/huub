@@ -2505,4 +2505,85 @@ mod tests {
 			.expect("diff_logic_branching should have populated the (x, y, -1) entry");
 		assert_eq!(b_again, cached);
 	}
+
+	#[test]
+	fn mid_search_diff_lit_lazy_creation_on_solver() {
+		// After lowering, call `Decision<IntVal>::diff_lit` on the
+		// solver-side via the `IntDecisionActions<Solver<_>>` impl,
+		// which opens a `SolvingContext` and delegates. The (x, y, 5)
+		// shape was NOT pre-allocated at model time, so this exercises
+		// the lazy-creation branch (allocate fresh `b`, register both
+		// gated edges in the engine-side graph, populate the cache,
+		// push chain clauses).
+		use crate::{
+			actions::IntDecisionActions,
+			solver::{Solver, view::integer::IntView},
+		};
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+		// Pre-intern the (x, y) endpoints via `diff_logic_branching`
+		// so the SolvingContext-side `diff_lit` finds them in the
+		// graph. Only d=-1 is cached after this call.
+		let _ = model.diff_logic_branching(vec![xv, yv]);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+
+		// Resolve to solver-side `Decision<IntVal>` (the variant of
+		// View<IntVal> we know our brancher endpoints became).
+		let sx_view = map.get(&mut slv, xv);
+		let sy_view = map.get(&mut slv, yv);
+		let (sx_dec, sy_dec) = match (sx_view.0, sy_view.0) {
+			(IntView::Linear(lin_x), IntView::Linear(lin_y)) => (lin_x.var, lin_y.var),
+			_ => panic!("expected Linear views from the lowering map"),
+		};
+
+		// Lazy-create the gate for `x − y ≤ 5` (not posted at lowering).
+		let lazy = sx_dec.diff_lit(&mut slv, sy_dec, 5);
+
+		// The cache should now hold it in both directions.
+		let engine = slv.engine.borrow();
+		let cached_fwd = engine
+			.state
+			.diff_lit_map
+			.get(&(sx_view, sy_view))
+			.and_then(|m| m.get(&5))
+			.copied();
+		let cached_rev = engine
+			.state
+			.diff_lit_map
+			.get(&(sy_view, sx_view))
+			.and_then(|m| m.get(&-6))
+			.copied();
+		assert_eq!(
+			cached_fwd,
+			Some(lazy),
+			"forward cache must hold the new gate"
+		);
+		assert_eq!(cached_rev, Some(!lazy), "reverse cache must hold !gate");
+
+		// And the graph must hold the two gated edges (x → y, 5) and (y → x, -6).
+		let graph = engine.state.diff_logic_graph.borrow();
+		let from = graph.int_var_to_node[&sx_view];
+		let to = graph.int_var_to_node[&sy_view];
+		let has_fwd = graph
+			.edges
+			.iter()
+			.any(|e| e.from == from && e.to == to && e.val == 5 && e.bool_var.is_some());
+		let has_rev = graph
+			.edges
+			.iter()
+			.any(|e| e.from == to && e.to == from && e.val == -6 && e.bool_var.is_some());
+		assert!(
+			has_fwd,
+			"forward gated edge missing in graph after lazy creation"
+		);
+		assert!(
+			has_rev,
+			"reverse gated edge missing in graph after lazy creation"
+		);
+	}
 }

@@ -1,6 +1,10 @@
 //! Internal state representation of the propagation engine.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+	cell::RefCell,
+	collections::{BTreeMap, VecDeque},
+	rc::Rc,
+};
 
 use pindakaas::{Lit as RawLit, Var as RawVar};
 use rustc_hash::FxHashMap;
@@ -9,7 +13,7 @@ use tracing::debug;
 use crate::{
 	Clause, IntVal,
 	actions::{ReasoningContext, ReasoningEngine, Trailed, TrailingActions},
-	constraints::{Conflict, Reason},
+	constraints::{Conflict, Reason, difference_logic::DiffLogicState},
 	helpers::bytes::Bytes,
 	solver::{
 		IntLitMeaning, SearchStrategy, SwitchTrigger,
@@ -65,9 +69,18 @@ pub struct State {
 	/// Per `(x_view, y_view)` ordered chain of Reified Booleans for
 	/// `x − y ≤ d` constraints. Populated at lowering time from
 	/// `Model::diff_lit_map` via the `LoweringMap`; extended mid-search
-	/// by `DiffLogicActions::diff_lit` calls. Cached in BOTH directions:
+	/// by `IntDecisionActions::diff_lit` calls. Cached in BOTH directions:
 	/// `(x, y, d) → b` and `(y, x, −d − 1) → !b`.
 	pub(crate) diff_lit_map: FxHashMap<(View<IntVal>, View<IntVal>), BTreeMap<IntVal, View<bool>>>,
+	/// Shared diff-logic graph. Always present; empty until the first
+	/// edge is registered via `Solver::add_diff_logic_edge`. Co-owned
+	/// (by `Rc::clone`) with the `Solver` and any
+	/// `DifferenceLogicPropagator` instance so the graph is reachable
+	/// from both `SolvingContext`-driven lazy edge creation and
+	/// model-stage `Solver::*` methods. The cell uses interior
+	/// mutability; coordinate borrows carefully when mutating during
+	/// propagation.
+	pub(crate) diff_logic_graph: Rc<RefCell<DiffLogicState>>,
 	/// Trailed storage, including lower and upper bounds for integer variables
 	/// and Boolean variable assignments.
 	pub(crate) trail: Trail,

@@ -1418,7 +1418,16 @@ impl<Sat: ExternalPropagation> BrancherInitActions for Solver<Sat> {
 impl Clone for Solver<Cadical> {
 	fn clone(&self) -> Self {
 		let mut sat = self.sat.shallow_clone();
-		let engine: Engine = self.engine.borrow().clone();
+		let mut engine: Engine = self.engine.borrow().clone();
+		// Deep-clone the diff-logic graph: the cloned solver owns its
+		// own independent graph, sharing nothing with the original. The
+		// cloned `engine` already holds a fresh `Rc<RefCell<...>>`
+		// (because `Engine: Clone` deep-clones the state's `Rc`); we
+		// take a clone of that Rc for the new `Solver.diff_logic_graph`
+		// so the two sides agree on a single cell.
+		engine.state.diff_logic_graph =
+			Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
+		let diff_logic_graph = Rc::clone(&engine.state.diff_logic_graph);
 		let engine = Rc::new(RefCell::new(engine));
 		sat.connect_propagator(Rc::clone(&engine));
 		for var in sat.emitted_vars() {
@@ -1426,9 +1435,6 @@ impl Clone for Solver<Cadical> {
 				sat.add_observed_var(var);
 			}
 		}
-		// Deep-clone the diff-logic graph: the new solver owns its own
-		// independent state, sharing nothing with the original.
-		let diff_logic_graph = Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
 		Solver {
 			sat,
 			engine,
@@ -1452,13 +1458,18 @@ impl<Sat: ExternalPropagation> DecisionActions for Solver<Sat> {
 impl<Sat: Default + ExternalPropagation + LearnCallback> Default for Solver<Sat> {
 	fn default() -> Self {
 		let mut sat = Sat::default();
-		let engine = Rc::default();
+		let engine: Rc<RefCell<Engine>> = Rc::default();
 		sat.set_learn_callback(Some(trace_learned_clause));
 		sat.connect_propagator(Rc::clone(&engine));
+		// Share a single diff-logic graph cell between `Solver` and
+		// `engine::State`. `State::default()` constructs its own empty
+		// `Rc<RefCell<DiffLogicState>>`; we clone that Rc here so both
+		// sides point at the same cell.
+		let diff_logic_graph = Rc::clone(&engine.borrow().state.diff_logic_graph);
 		Self {
 			sat,
 			engine,
-			diff_logic_graph: Rc::new(RefCell::new(Default::default())),
+			diff_logic_graph,
 		}
 	}
 }

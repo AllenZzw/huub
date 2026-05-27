@@ -132,22 +132,36 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 		var.lit(meaning, new_var).0
 	}
 
-	/// Engine-side diff-logic literal lookup. Cache (populated at
-	/// lowering time from `Model::diff_lit_map` and extended on demand
-	/// once mid-search edge registration is wired up) is keyed by
-	/// solver-side `View<IntVal>` ordered pair with an inner
-	/// `BTreeMap<IntVal, View<bool>>` chain.
+	/// Engine-side diff-logic literal lookup with mid-search lazy creation.
 	///
-	/// On a cache miss this implementation panics. Mid-search lazy edge
-	/// creation needs (a) graph-mutation access from `SolvingContext`
-	/// and (b) `subscribe_int_bounds_advisor` to register advisors on
-	/// newly-introduced endpoints; both are deferred to the future
-	/// `tighten_difference` PR. Until then, callers must ensure every
-	/// `(x, y, d)` they request was allocated at lowering time via
-	/// `Model::diff_lit` or `Model::diff_logic_branching`.
+	/// Cache (populated at lowering time from `Model::diff_lit_map` and
+	/// extended on demand here) is keyed by solver-side `View<IntVal>`
+	/// ordered pair with an inner `BTreeMap<IntVal, View<bool>>` chain.
+	///
+	/// Restriction: BOTH endpoints must already be interned in the
+	/// diff-logic graph (i.e. they appeared in at least one constraint
+	/// at lowering time). Introducing brand-new endpoints during search
+	/// would also require subscribing the diff-logic propagator's
+	/// bounds/booleans advisors on them, which is
+	/// `subscribe_int_bounds_advisor` future work. Lazy creation between two
+	/// existing endpoints is sound because their advisors already drive the
+	/// propagator.
+	///
+	/// Caveat for newly-introduced gating Booleans: the propagator does
+	/// not subscribe a "fixed" advisor for them mid-search, so SAT setting
+	/// the new gate won't immediately wake the propagator. The chain
+	/// implication clauses pushed below still propagate at the SAT level,
+	/// and `propagate_booleans` polls the bool state when the propagator
+	/// runs (triggered by any other change), so correctness holds — but
+	/// there is some wake-up latency until the advisor-subscription helper
+	/// lands.
 	fn diff_lit(&self, ctx: &mut SolvingContext<'_>, other: Self, d: IntVal) -> View<bool> {
+		use crate::solver::view::boolean::BoolView;
+
 		let x: View<IntVal> = (*self).into();
 		let y: View<IntVal> = other.into();
+
+		// 1. Cache hits, both directions.
 		if let Some(b) = ctx.state.diff_lit_map.get(&(x, y)).and_then(|m| m.get(&d)) {
 			return *b;
 		}
@@ -159,12 +173,84 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 		{
 			return !*b;
 		}
-		panic!(
-			"IntDecisionActions::diff_lit on SolvingContext: mid-search lazy edge creation is not \
-			 yet supported. The (x, y, d) entry must have been allocated at lowering time via \
-			 Model::diff_lit or Model::diff_logic_branching. On-demand allocation lands with the \
-			 tighten_difference infrastructure (advisor subscription + graph-mutation access)."
-		);
+
+		// 2. Endpoint-interning precondition.
+		{
+			let graph = ctx.state.diff_logic_graph.borrow();
+			if !graph.int_var_to_node.contains_key(&x) || !graph.int_var_to_node.contains_key(&y) {
+				panic!(
+					"IntDecisionActions::diff_lit on SolvingContext: both endpoints must already \
+					 be interned in the diff-logic graph (i.e. appear in a constraint posted at \
+					 lowering time). Mid-search introduction of brand-new endpoints requires the \
+					 advisor-subscription helper, which has not landed yet. Got x={:?}, y={:?}",
+					x, y
+				);
+			}
+		}
+
+		// 3. Probe forward chain neighbours BEFORE allocating.
+		let prev_b = ctx
+			.state
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range(..d).next_back().map(|(_, &b)| b));
+		let next_b = ctx
+			.state
+			.diff_lit_map
+			.get(&(x, y))
+			.and_then(|m| m.range((d + 1)..).next().map(|(_, &b)| b));
+
+		// 4. Allocate a fresh SAT variable for the new gate.
+		let raw_var = ctx.slv.new_observed_var();
+		ctx.state.statistics.lazy_literals += 1;
+		ctx.state.trail.grow_to_boolvar(raw_var);
+		let new_lit: pindakaas::Lit = raw_var.into();
+		let b: View<bool> = View(BoolView::Lit(Decision(new_lit)));
+
+		// 5. Register both gated edges in the diff-logic graph. `Rc::clone` lets us
+		//    hold the graph borrow simultaneously with `&mut ctx.state.trail`, since
+		//    they are independent cells.
+		let graph_rc = std::rc::Rc::clone(&ctx.state.diff_logic_graph);
+		{
+			let mut graph = graph_rc.borrow_mut();
+			let _ = graph.register_edge(&mut ctx.state.trail, x, y, d, Some(b));
+			let _ = graph.register_edge(&mut ctx.state.trail, y, x, -d - 1, Some(!b));
+		}
+
+		// 6. Populate cache in BOTH directions.
+		let _ = ctx
+			.state
+			.diff_lit_map
+			.entry((x, y))
+			.or_default()
+			.insert(d, b);
+		let _ = ctx
+			.state
+			.diff_lit_map
+			.entry((y, x))
+			.or_default()
+			.insert(-d - 1, !b);
+
+		// 7. Push order-encoding chain implication clauses to the SAT solver via
+		//    `state.clauses` (same mechanism the unary `IntDecisionActions::lit` uses
+		//    for `defining_clauses`). `a → b` becomes `¬a ∨ b`.
+		let as_raw = |v: View<bool>| -> pindakaas::Lit {
+			match v.0 {
+				BoolView::Lit(d) => d.0,
+				BoolView::Const(_) => unreachable!(
+					"chain neighbour can not be a constant: the cache only stores `Lit`-flavoured \
+					 `View<bool>`s allocated via `new_observed_var`"
+				),
+			}
+		};
+		if let Some(bp) = prev_b {
+			ctx.state.clauses.push_back(vec![!as_raw(bp), as_raw(b)]);
+		}
+		if let Some(bn) = next_b {
+			ctx.state.clauses.push_back(vec![!as_raw(b), as_raw(bn)]);
+		}
+
+		b
 	}
 }
 
