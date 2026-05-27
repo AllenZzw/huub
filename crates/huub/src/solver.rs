@@ -1032,11 +1032,6 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		self.add_clause(clause)
 	}
 
-	/// Register a difference logic edge `x − y ≤ d` on the engine-resident
-	/// graph and auto-post the bounds shell on the first edge.
-	///
-	/// `gate` is reserved for the planned boolean-gated implication support
-	/// and must be `None` in this build; passing `Some(_)` panics.
 	/// Intern an integer endpoint into the shared diff-logic graph
 	/// without registering an edge. Must be called for every endpoint
 	/// that will appear in a subsequent [`Self::add_diff_logic_edge`]
@@ -1065,6 +1060,11 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 			.intern_bool(&mut engine.state.trail, view);
 	}
 
+	/// Register a difference-logic edge `x − y ≤ d` on the
+	/// engine-resident graph. `gate == None` is a globally-active edge;
+	/// `gate == Some(b)` is the implication `b → (x − y ≤ d)`. The first
+	/// call auto-registers
+	/// [`crate::constraints::difference_logic::DifferenceLogicPropagator`].
 	pub(crate) fn add_diff_logic_edge(
 		&mut self,
 		x: View<IntVal>,

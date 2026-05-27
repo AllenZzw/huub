@@ -206,6 +206,27 @@ where
 		val: IntVal,
 		reason: impl ReasonBuilder<Context>,
 	) -> Result<(), Context::Conflict>;
+
+	/// Enforce the binary diff-logic constraint `self − other ≤ d`
+	/// because of the given `reason`.
+	///
+	/// Composes [`IntDecisionActions::diff_lit`] (get-or-create the
+	/// Reified gating Boolean for the `(self, other, d)` shape) with a
+	/// `b = true` propagation: the engine-side diff-logic propagator
+	/// then activates the corresponding gated edge and propagates the
+	/// implied bound updates.
+	///
+	/// Implementations on contexts / wrapper views that don't host the
+	/// diff-logic literal store should `unimplemented!`.
+	fn tighten_difference(
+		&self,
+		ctx: &mut Context,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Context>,
+	) -> Result<(), Context::Conflict>
+	where
+		Self: Sized;
 }
 
 /// Actions available to [`Constraint`](crate::constraints::Constraint)
@@ -375,6 +396,21 @@ where
 			Err(ctx.declare_conflict(reason))
 		} else {
 			Ok(())
+		}
+	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut Ctx,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Ctx>,
+	) -> Result<(), Ctx::Conflict> {
+		// Constant − constant comparison: succeeds iff statically true.
+		if *self - other <= d {
+			Ok(())
+		} else {
+			Err(ctx.declare_conflict(reason))
 		}
 	}
 }

@@ -355,6 +355,35 @@ where
 			IntView::Const(c) => c.tighten_min(ctx, val, reason),
 		}
 	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut Ctx,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Ctx>,
+	) -> Result<(), Ctx::Conflict> {
+		// Mirror the View<IntVal>::diff_lit dispatch — only unit-scaled
+		// Linear×Linear pairs are supported; other shapes lack a
+		// canonical form in the diff-logic graph.
+		match (self.0, other.0) {
+			(IntView::Linear(lin_a), IntView::Linear(lin_b))
+				if lin_a.scale.get() == 1 && lin_b.scale.get() == 1 =>
+			{
+				let d_folded = d - lin_a.offset + lin_b.offset;
+				lin_a
+					.var
+					.tighten_difference(ctx, lin_b.var, d_folded, reason)
+			}
+			_ => unimplemented!(
+				"tighten_difference on solver View<IntVal>: only unit-scaled Linear×Linear pairs \
+				 are supported; got {:?} − {:?} ≤ {}",
+				self.0,
+				other.0,
+				d
+			),
+		}
+	}
 }
 
 impl Mul<NonZero<IntVal>> for View<IntVal> {

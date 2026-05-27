@@ -40,7 +40,7 @@ use huub::{
 	lower::LoweringError,
 	model::deserialize::{
 		Goal,
-		flatzinc::{FlatZincError, FznIdent, HuubFlatZinc},
+		flatzinc::{FlatZincError, FlatZincWithOptions, FznIdent, HuubFlatZinc},
 	},
 	solver::{
 		AnyView, SearchStrategy, Solution, Solver, Status, SwitchTrigger, TerminationSignal,
@@ -122,7 +122,8 @@ impl<'a> Cli<'a> {
 			)
 		})?;
 
-		let (mut slv, meta): (Solver, _) = match fzn
+		let (mut slv, meta): (Solver, _) = match FlatZincWithOptions::new(&fzn)
+			.with_diff_logic_level(self.diff_logic_level)
 			.lower()
 			.int_eager_limit(self.int_eager_limit)
 			.preprocessing(self.preprocessing)

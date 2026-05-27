@@ -741,6 +741,17 @@ impl IntPropagationActions<Model> for View<IntVal> {
 	) -> Result<(), Conflict<View<bool>>> {
 		self.resolve_alias(ctx).tighten_min(ctx, val, reason)
 	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut Model,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Model>,
+	) -> Result<(), Conflict<View<bool>>> {
+		let b = self.diff_lit(ctx, other, d);
+		b.fix(ctx, true, reason)
+	}
 }
 
 impl IntSimplificationActions<Model> for View<IntVal> {

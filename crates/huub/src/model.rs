@@ -33,12 +33,16 @@ use crate::{
 	},
 	constraints::{
 		BoxedConstraint, Conflict, Constraint, DeferredReason, Reason, ReasonBuilder,
-		SimplificationStatus, difference_logic::DifferenceLogicCollection,
+		SimplificationStatus,
 	},
 	helpers::bytes::Bytes,
 	lower::{Lowerer, LowererComplete},
 	model::{
 		decision::{boolean::BoolDecision, integer::IntDecision},
+		expressions::difference_logic::{
+			DifferenceLogicConstraint, ModelDiffEdge, expand_collection, simplify_bound_tightening,
+			simplify_cycle_detection, simplify_johnson_pruning, simplify_unify,
+		},
 		initilization_context::ModelInitContext,
 	},
 	solver::{
@@ -109,7 +113,7 @@ pub(crate) struct ConRef(u32);
 /// # assert_eq!(x + y, 4);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Model {
 	/// A base [`Cnf`] object that contains pure Boolean parts of the problem.
 	pub(crate) cnf: Cnf,
@@ -137,8 +141,15 @@ pub struct Model {
 	/// Definitions of the advisors that are listening to selected changes.
 	advisors: Vec<Advisor>,
 
-	/// Collection of raw difference logic constraints.
-	pub(crate) diff_logic: DifferenceLogicCollection,
+	/// Acceptance level for difference-logic auto-detection in
+	/// [`Model::try_route_diff_logic`]. Default `1` (Global / Implied /
+	/// Reified). Higher levels admit more variants; level `0` disables
+	/// diff-logic routing entirely.
+	pub(crate) diff_logic_level: u8,
+	/// Raw difference-logic constraints accumulated during model
+	/// construction. Drained at lowering time by
+	/// [`Model::lower_diff_logic`].
+	pub(crate) diff_logic_constraints: Vec<DifferenceLogicConstraint>,
 
 	/// Per `(canonical_x, canonical_y)` ordered chain of Reified
 	/// Booleans for `x − y ≤ d` constraints. Keys are model-side
@@ -150,10 +161,30 @@ pub struct Model {
 	pub(crate) diff_lit_map: FxHashMap<(View<IntVal>, View<IntVal>), BTreeMap<IntVal, View<bool>>>,
 }
 
+impl Default for Model {
+	fn default() -> Self {
+		Self {
+			cnf: Cnf::default(),
+			constraints: Vec::new(),
+			bool_vars: Vec::new(),
+			int_vars: Vec::new(),
+			propagator_queue: PropagatorQueue::default(),
+			trail: Vec::new(),
+			cur_prop: None,
+			int_events: FxHashMap::default(),
+			bool_events: Vec::new(),
+			advisors: Vec::new(),
+			diff_logic_level: 1,
+			diff_logic_constraints: Vec::new(),
+			diff_lit_map: FxHashMap::default(),
+		}
+	}
+}
+
 impl Model {
 	/// Follow any aliasing chain on the given integer view, returning a
 	/// view that no longer references aliases. Useful after
-	/// [`crate::constraints::difference_logic::simplify_unify`] has
+	/// [`crate::model::expressions::difference_logic::simplify_unify`] has
 	/// collapsed equivalent variables onto a single representative.
 	pub fn resolve_alias(&self, view: View<IntVal>) -> View<IntVal> {
 		view.resolve_alias(self).into_inner()
@@ -168,7 +199,7 @@ impl Model {
 	/// after the LHS offset has been moved over.
 	///
 	/// Returns `Some(Ok(()))` when the constraint matched a diff-logic
-	/// pattern and has been added to `self.diff_logic`. Returns
+	/// pattern and has been added to `self.diff_logic_constraints`. Returns
 	/// `Some(Err(_))` if matching succeeded but posting a side-effect
 	/// (none of the level-1 paths post anything, so this is reserved for
 	/// forward compatibility). Returns `None` when the pattern doesn't
@@ -185,11 +216,11 @@ impl Model {
 		reif: Option<crate::constraints::int_linear::Reification>,
 	) -> Option<Result<(), Conflict<View<bool>>>> {
 		use crate::{
-			constraints::{
-				difference_logic::DifferenceLogicConstraint as DLC,
-				int_linear::{LinComparator, Reification},
+			constraints::int_linear::{LinComparator, Reification},
+			model::{
+				expressions::difference_logic::DifferenceLogicConstraint as DLC,
+				view::integer::IntView,
 			},
-			model::view::integer::IntView,
 		};
 
 		if terms.len() != 2 {
@@ -241,7 +272,7 @@ impl Model {
 		// Normalize so `x` carries the +1 coefficient.
 		let (x, y) = if sa == 1 { (a, b) } else { (b, a) };
 
-		let level = self.diff_logic.parameters().level;
+		let level = self.diff_logic_level;
 		// `match` returns the list of diff-logic constraints to add for
 		// this (comparator, reif) combination, gated by level. Returning
 		// an empty `Vec` from a guarded arm means "level too low" and
@@ -283,7 +314,7 @@ impl Model {
 					self.add_diff_logic_reified(b, x, y, d);
 				}
 				other => {
-					let ok = self.diff_logic.add(other);
+					let ok = self.add_diff_logic_constraint(other);
 					debug_assert!(ok, "diff-logic level rejected accepted constraint");
 				}
 			}
@@ -300,7 +331,7 @@ impl Model {
 	/// supplied `b` is aliased onto the canonical Boolean via
 	/// [`Model::unify`] and NO new Reified constraint is added.
 	/// Otherwise the supplied `b` becomes the new canonical: the
-	/// Reified is posted into `self.diff_logic`, the cache is
+	/// Reified is posted into `self.diff_logic_constraints`, the cache is
 	/// populated in BOTH directions, and order-encoding chain
 	/// implication clauses (`prev → b` and `b → next`) are posted to
 	/// immediate `d`-neighbours.
@@ -351,10 +382,7 @@ impl Model {
 		y: View<IntVal>,
 		d: IntVal,
 	) {
-		use crate::{
-			constraints::difference_logic::DifferenceLogicConstraint,
-			model::expressions::bool_formula::BoolFormula,
-		};
+		use crate::model::expressions::bool_formula::BoolFormula;
 
 		// Probe forward-direction chain neighbours BEFORE mutating the map.
 		let prev = self
@@ -367,9 +395,7 @@ impl Model {
 			.and_then(|m| m.range((d + 1)..).next().map(|(_, &b)| b));
 
 		// Post Reified constraint.
-		let _ = self
-			.diff_logic
-			.add(DifferenceLogicConstraint::Reified(b, x, y, d));
+		let _ = self.add_diff_logic_constraint(DifferenceLogicConstraint::Reified(b, x, y, d));
 
 		// Populate cache in both directions.
 		let _ = self.diff_lit_map.entry((x, y)).or_default().insert(d, b);
@@ -396,6 +422,46 @@ impl Model {
 				))
 				.post();
 		}
+	}
+
+	/// Try to push a `DifferenceLogicConstraint` into
+	/// [`Self::diff_logic_constraints`]. Returns `true` when the current
+	/// `diff_logic_level` accepts the variant (and the constraint is
+	/// stored), or `false` when the level rejects it.
+	pub(crate) fn add_diff_logic_constraint(&mut self, c: DifferenceLogicConstraint) -> bool {
+		use DifferenceLogicConstraint as DLC;
+		let accept = match c {
+			DLC::Global(..) | DLC::Implied(..) | DLC::Reified(..) => self.diff_logic_level >= 1,
+			DLC::ImpliedEquals(..) => self.diff_logic_level >= 2,
+			DLC::NotEquals(..) | DLC::ImpliedNotEquals(..) | DLC::ReifiedEquals(..) => {
+				self.diff_logic_level >= 3
+			}
+		};
+		if accept {
+			self.diff_logic_constraints.push(c);
+		}
+		accept
+	}
+
+	/// Run the model-stage diff-logic lowering pipeline: expand the raw
+	/// constraints into flat edges, then apply the four simplification
+	/// slices (cycle detection, bound tightening, Johnson pruning,
+	/// equality-cycle unification). Returns `None` if no diff-logic
+	/// constraints were posted, otherwise the surviving edges ready for
+	/// engine-side posting.
+	pub(crate) fn lower_diff_logic(
+		&mut self,
+	) -> Result<Option<Vec<ModelDiffEdge>>, Conflict<View<bool>>> {
+		if self.diff_logic_constraints.is_empty() {
+			return Ok(None);
+		}
+		let raw = mem::take(&mut self.diff_logic_constraints);
+		let edges = expand_collection(self, raw)?;
+		let edges = simplify_cycle_detection(edges)?;
+		let edges = simplify_bound_tightening(self, edges)?;
+		let edges = simplify_johnson_pruning(edges);
+		let edges = simplify_unify(self, edges)?;
+		Ok(Some(edges))
 	}
 }
 
@@ -602,8 +668,9 @@ impl Model {
 	/// Declare a diff-logic pair-based brancher over the given integer
 	/// array. For each pair `(i, j)` with `i < j`, allocate a fresh
 	/// reified Boolean `b_{ij}` and post `Reified(b_{ij}, x_i, x_j, -1)`
-	/// (i.e. `b_{ij} ↔ (x_i < x_j)`) into `self.diff_logic`. The
-	/// returned [`Branching::DiffLogic`] can be passed to
+	/// (i.e. `b_{ij} ↔ (x_i < x_j)`) into `self.diff_logic_constraints`.
+	/// The returned [`crate::model::deserialize::Branching::DiffLogic`]
+	/// can be passed to
 	/// `Branching::to_solver` (or composed via `Branching::Seq`) after
 	/// lowering — `to_solver` recovers the pair Booleans by looking up
 	/// the gated edges this method posted.

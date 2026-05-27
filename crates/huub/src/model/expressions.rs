@@ -14,6 +14,7 @@
 )]
 
 pub(crate) mod bool_formula;
+pub(crate) mod difference_logic;
 pub(crate) mod element;
 pub(crate) mod linear;
 
@@ -265,11 +266,11 @@ impl Model {
 
 		// Diff-logic auto-detection: if the normalized linear matches
 		// `±x ∓ y op rhs` with unit coefficients, route to
-		// `self.diff_logic` instead of constructing an IntLinear.
-		// `try_route_diff_logic` gates itself on the collection's level
-		// (default 0 = disabled); callers opt in by raising the level
-		// via `DifferenceLogicCollection::set_parameters` or the CLI
-		// `--diff-logic` flag.
+		// `self.diff_logic_constraints` instead of constructing an
+		// IntLinear. `try_route_diff_logic` gates itself on
+		// `Model::diff_logic_level` (default 1); callers opt out by
+		// setting it to 0 or opt into higher variants by raising it
+		// directly or via the CLI `--diff-logic-level` flag.
 		if let Some(result) = self.try_route_diff_logic(&terms, comparator, rhs, reif) {
 			return result;
 		}

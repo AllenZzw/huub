@@ -19,11 +19,6 @@ use rangelist::IntervalIterator;
 use rustc_hash::FxHashSet;
 use tracing::warn;
 
-#[cfg(feature = "flatzinc")]
-use crate::model::deserialize::{
-	Goal,
-	flatzinc::{FlatZincError, FlatZincLowerData, FlatZincModelMeta, FlatZincSolverMeta},
-};
 use crate::{
 	IntSet, IntVal,
 	actions::{
@@ -33,16 +28,20 @@ use crate::{
 	constraints::{
 		BoxedPropagator, Conflict, Constraint, ReasonBuilder,
 		bool_array_element::BoolDecisionArrayElement,
-		difference_logic::{
-			expand_collection, simplify_bound_tightening, simplify_cycle_detection,
-			simplify_johnson_pruning, simplify_unify,
-		},
 		int_array_element::{IntArrayElementBounds, IntValArrayElement},
 		int_table::IntTable,
 		int_unique::IntUnique,
 	},
 	helpers::bytes::Bytes,
-	model::{self, Model, decision::integer::Domain, resolved::Resolved},
+	model::{
+		self, Model,
+		decision::integer::Domain,
+		deserialize::{
+			Goal,
+			flatzinc::{FlatZincError, FlatZincLowerData, FlatZincModelMeta, FlatZincSolverMeta},
+		},
+		resolved::Resolved,
+	},
 	solver::{
 		self, IntLitMeaning, LiteralStrategy, Solver, engine::Engine, view::boolean::BoolView,
 	},
@@ -406,17 +405,7 @@ impl LowererComplete<&mut Model> {
 		// runs here too so any equality-cycle `unify` calls land before
 		// alias-using code (constraint lowering, eager-encoding analysis)
 		// looks at variable identity.
-		let diff_logic_edges = if !model.diff_logic.is_empty() {
-			let raw = model.diff_logic.take_constraints();
-			let edges = expand_collection(model, raw).map_err(LoweringError::from)?;
-			let edges = simplify_cycle_detection(model, edges).map_err(LoweringError::from)?;
-			let edges = simplify_bound_tightening(model, edges).map_err(LoweringError::from)?;
-			let edges = simplify_johnson_pruning(model, edges);
-			let edges = simplify_unify(model, edges).map_err(LoweringError::from)?;
-			Some(edges)
-		} else {
-			None
-		};
+		let diff_logic_edges = model.lower_diff_logic().map_err(LoweringError::from)?;
 
 		// Determine encoding types for integer variables
 		let mut int_eager_direct = FxHashSet::<Resolved<model::Decision<IntVal>>>::default();
@@ -505,9 +494,9 @@ impl LowererComplete<&mut Model> {
 		//
 		// Two passes:
 		// 1. Pre-intern every endpoint (int + bool) so the engine's diff-logic graph
-		//    already knows about it when the first edge auto-registers the propagator
-		//    shells. Without this, later-interned endpoints would never get advisors
-		//    (the shells' `initialize` only fires once).
+		//    already knows about it when the first edge auto-registers the propagator.
+		//    Without this, later-interned endpoints would never get advisors (the
+		//    propagator's `initialize` only fires once).
 		// 2. Register the edges themselves.
 		if let Some(edges) = diff_logic_edges {
 			for edge in &edges {

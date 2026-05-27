@@ -236,6 +236,21 @@ where
 	) -> Result<(), Ctx::Conflict> {
 		self.var.tighten_min(ctx, val - self.offset, reason)
 	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut Ctx,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Ctx>,
+	) -> Result<(), Ctx::Conflict>
+	where
+		Self: Sized,
+	{
+		// (var_a + off_a) − (var_b + off_b) ≤ d  ⇔  var_a − var_b ≤ d − off_a + off_b
+		self.var
+			.tighten_difference(ctx, other.var, d - self.offset + other.offset, reason)
+	}
 }
 
 impl<Var> Neg for OffsetView<IntVal, Var> {

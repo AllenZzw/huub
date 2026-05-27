@@ -368,6 +368,18 @@ where
 				.tighten_max(ctx, self.reverse_val_floor(val), reason)
 		}
 	}
+
+	fn tighten_difference(
+		&self,
+		_ctx: &mut Ctx,
+		_other: Self,
+		_d: IntVal,
+		_reason: impl ReasonBuilder<Ctx>,
+	) -> Result<(), Ctx::Conflict> {
+		unimplemented!(
+			"tighten_difference on LinearView: route through View<IntVal> which folds scales/offsets"
+		)
+	}
 }
 
 impl<Ctx, Var> IntSimplificationActions<Ctx> for LinearView<NonZero<IntVal>, IntVal, Var>

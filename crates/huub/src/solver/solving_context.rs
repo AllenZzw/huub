@@ -153,8 +153,8 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 	///
 	/// Precondition: the diff-logic propagator must already be
 	/// initialised (`DiffLogicState::propagator_ref` set). For the
-	/// model→engine lowering path this holds by construction — Slice 1
-	/// already auto-registers the propagator on the first edge.
+	/// model→engine lowering path this holds by construction — the first
+	/// `Solver::add_diff_logic_edge` call auto-registers the propagator.
 	fn diff_lit(&self, ctx: &mut SolvingContext<'_>, other: Self, d: IntVal) -> View<bool> {
 		let x: View<IntVal> = (*self).into();
 		let y: View<IntVal> = other.into();
@@ -340,6 +340,17 @@ impl<'a> IntPropagationActions<SolvingContext<'a>> for Decision<IntVal> {
 		reason: impl ReasonBuilder<SolvingContext<'a>>,
 	) -> Result<(), Conflict<Decision<bool>>> {
 		ctx.propagate_int(*self, ChangeRequest::SetLowerBound(val), reason)
+	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut SolvingContext<'a>,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<SolvingContext<'a>>,
+	) -> Result<(), Conflict<Decision<bool>>> {
+		let b = self.diff_lit(ctx, other, d);
+		b.fix(ctx, true, reason)
 	}
 }
 

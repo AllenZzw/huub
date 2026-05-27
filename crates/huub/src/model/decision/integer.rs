@@ -7,8 +7,8 @@ use rangelist::IntervalIterator;
 use crate::{
 	IntSet, IntVal,
 	actions::{
-		IntDecisionActions, IntEvent, IntInspectionActions, IntPropCond, IntPropagationActions,
-		IntSimplificationActions, ReasoningContext,
+		BoolPropagationActions, IntDecisionActions, IntEvent, IntInspectionActions, IntPropCond,
+		IntPropagationActions, IntSimplificationActions, ReasoningContext,
 	},
 	constraints::ReasonBuilder,
 	model::{
@@ -155,6 +155,17 @@ impl IntPropagationActions<Model> for Decision<IntVal> {
 		reason: impl ReasonBuilder<Model>,
 	) -> Result<(), <Model as ReasoningContext>::Conflict> {
 		self.resolve_alias(ctx).tighten_min(ctx, val, reason)
+	}
+
+	fn tighten_difference(
+		&self,
+		ctx: &mut Model,
+		other: Self,
+		d: IntVal,
+		reason: impl ReasonBuilder<Model>,
+	) -> Result<(), <Model as ReasoningContext>::Conflict> {
+		let b = self.diff_lit(ctx, other, d);
+		b.fix(ctx, true, reason)
 	}
 }
 

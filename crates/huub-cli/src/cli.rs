@@ -136,6 +136,17 @@ pub struct Cli<'a> {
 	/// Control globally blocked clause elimination (conditioning).
 	#[arg(long, action = ArgAction::Set, value_parser = BoolishValueParser::new(), value_name = "bool", default_value_t = Lowerer::DEFAULT_CONDITIONING, help_heading = CLI_SECTION_PROCESSING)]
 	pub(crate) conditioning: bool,
+	/// Difference-logic auto-detection level for `Model::linear`.
+	///
+	/// - `0`: disabled. `Model::linear` never routes constraints into the
+	///   diff-logic collection; behaves like the `develop` baseline.
+	/// - `1`: accept `Global(x − y ≤ d)`, `Implied(b → ·)`, `Reified(b ↔ ·)`,
+	///   and `Equal` decompositions.
+	/// - `2`: also accept `ImpliedEquals(b → (x = y + d))`.
+	/// - `3`: also accept `NotEquals` / `ReifiedEquals` / `ImpliedNotEquals`
+	///   (introduces fresh Booleans).
+	#[arg(long = "diff-logic-level", value_name = "u8", default_value_t = 1, help_heading = CLI_SECTION_PROCESSING)]
+	pub(crate) diff_logic_level: u8,
 	/// Control SAT inprocessing during search.
 	#[arg(long, action = ArgAction::Set, value_parser = BoolishValueParser::new(), value_name = "bool", default_value_t = Lowerer::DEFAULT_INPROCESSING, help_heading = CLI_SECTION_PROCESSING)]
 	pub(crate) inprocessing: bool,
@@ -300,6 +311,7 @@ impl<'a> Cli<'a> {
 			search_trigger: self.search_trigger,
 			search_interval: self.search_interval,
 			conditioning: self.conditioning,
+			diff_logic_level: self.diff_logic_level,
 			inprocessing: self.inprocessing,
 			preprocessing: self.preprocessing,
 			probing: self.probing,

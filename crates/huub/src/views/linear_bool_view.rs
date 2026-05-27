@@ -363,6 +363,16 @@ where
 			Ok(())
 		}
 	}
+
+	fn tighten_difference(
+		&self,
+		_ctx: &mut Ctx,
+		_other: Self,
+		_d: IntVal,
+		_reason: impl ReasonBuilder<Ctx>,
+	) -> Result<(), Ctx::Conflict> {
+		unimplemented!("tighten_difference on LinearBoolView: convert to View<IntVal> first")
+	}
 }
 
 impl<Ctx, Var> IntSimplificationActions<Ctx> for LinearBoolView<NonZero<IntVal>, IntVal, Var>

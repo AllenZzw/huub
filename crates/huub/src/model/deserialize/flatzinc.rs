@@ -559,10 +559,49 @@ impl TryFrom<&str> for ConstraintIdent {
 	}
 }
 
-impl HuubFlatZinc for FlatZinc<FznIdent> {
+/// A [`FlatZinc`] reference paired with consumer-supplied configuration
+/// knobs that need to be applied to the [`Model`] **before** constraint
+/// posting (auto-detection routing decisions in [`Model::linear`] read
+/// these fields during construction, so they can't be set after the
+/// fact).
+///
+/// Provides an `impl HuubFlatZinc` so the standard
+/// [`HuubFlatZinc::lower`] surface works unchanged; consumers that want
+/// non-default values construct this wrapper instead of calling
+/// `lower()` on the bare `FlatZinc`.
+#[derive(Debug)]
+pub struct FlatZincWithOptions<'a> {
+	/// The FlatZinc instance to deserialize.
+	pub inner: &'a FlatZinc<FznIdent>,
+	/// Difference-logic auto-detection level. See
+	/// [`Model::diff_logic_level`] for the semantics of each value;
+	/// matches the default of `1` when constructed via [`Self::new`].
+	pub diff_logic_level: u8,
+}
+
+impl<'a> FlatZincWithOptions<'a> {
+	/// Wrap a [`FlatZinc`] with default configuration (`diff_logic_level
+	/// = 1`, matching [`Model::default`]).
+	pub fn new(inner: &'a FlatZinc<FznIdent>) -> Self {
+		Self {
+			inner,
+			diff_logic_level: 1,
+		}
+	}
+
+	/// Builder-style setter for the difference-logic auto-detection level.
+	pub fn with_diff_logic_level(mut self, level: u8) -> Self {
+		self.diff_logic_level = level;
+		self
+	}
+}
+
+impl HuubFlatZinc for FlatZincWithOptions<'_> {
 	fn lower(&self) -> Lowerer<Result<FlatZincLowerData, FlatZincError>> {
+		let level = self.diff_logic_level;
 		let deserialize_model = |fzn: &FlatZinc<FznIdent>| {
 			let mut builder = FznModelBuilder::new(fzn);
+			builder.prb.diff_logic_level = level;
 			builder.unify_variables()?;
 			builder.extract_views()?;
 			builder.post_constraints()?;
@@ -572,7 +611,7 @@ impl HuubFlatZinc for FlatZinc<FznIdent> {
 		};
 
 		LowererComplete::builder_internal(
-			deserialize_model(self).map(|(model, meta)| FlatZincLowerData { meta, model }),
+			deserialize_model(self.inner).map(|(model, meta)| FlatZincLowerData { meta, model }),
 		)
 	}
 }
