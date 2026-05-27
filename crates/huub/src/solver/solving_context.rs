@@ -13,16 +13,17 @@ use crate::{
 	IntSet, IntVal,
 	actions::{
 		BoolInspectionActions, BoolPropagationActions, DecisionActions, IntDecisionActions,
-		IntEvent, IntInspectionActions, IntPropagationActions, PropagationActions,
+		IntEvent, IntInspectionActions, IntPropCond, IntPropagationActions, PropagationActions,
 		ReasoningContext, ReasoningEngine, Trailed, TrailingActions,
 	},
 	constraints::{Conflict, DeferredReason, Reason, ReasonBuilder},
 	helpers::bytes::Bytes,
 	solver::{
 		BoxedPropagator, IntLitMeaning,
+		activation_list::ActivationAction,
 		decision::{Decision, integer::LazyLitDef},
-		engine::{Engine, LitPropagation, PropRef, State, trace_new_lit},
-		view::{View, boolean::BoolView},
+		engine::{AdvRef, AdvisorDef, Engine, LitPropagation, PropRef, State, trace_new_lit},
+		view::{View, boolean::BoolView, integer::IntView},
 	},
 };
 
@@ -138,26 +139,23 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 	/// extended on demand here) is keyed by solver-side `View<IntVal>`
 	/// ordered pair with an inner `BTreeMap<IntVal, View<bool>>` chain.
 	///
-	/// Restriction: BOTH endpoints must already be interned in the
-	/// diff-logic graph (i.e. they appeared in at least one constraint
-	/// at lowering time). Introducing brand-new endpoints during search
-	/// would also require subscribing the diff-logic propagator's
-	/// bounds/booleans advisors on them, which is
-	/// `subscribe_int_bounds_advisor` future work. Lazy creation between two
-	/// existing endpoints is sound because their advisors already drive the
-	/// propagator.
+	/// On a cache miss this implementation:
+	/// 1. Interns any brand-new endpoint into the diff-logic graph and
+	///    subscribes the diff-logic propagator's bounds advisor on it so
+	///    subsequent bound changes wake the propagator.
+	/// 2. Allocates a fresh Reified gating Boolean via
+	///    `ctx.slv.new_observed_var()` and subscribes a "fixed" advisor on it
+	///    so SAT decisions on the gate wake the propagator.
+	/// 3. Registers the forward + reverse gated edges (`x − y ≤ d` and `y − x ≤
+	///    −d − 1`) in the graph.
+	/// 4. Populates the cache in BOTH directions.
+	/// 5. Pushes order-encoding chain implication clauses to `state.clauses`.
 	///
-	/// Caveat for newly-introduced gating Booleans: the propagator does
-	/// not subscribe a "fixed" advisor for them mid-search, so SAT setting
-	/// the new gate won't immediately wake the propagator. The chain
-	/// implication clauses pushed below still propagate at the SAT level,
-	/// and `propagate_booleans` polls the bool state when the propagator
-	/// runs (triggered by any other change), so correctness holds — but
-	/// there is some wake-up latency until the advisor-subscription helper
-	/// lands.
+	/// Precondition: the diff-logic propagator must already be
+	/// initialised (`DiffLogicState::propagator_ref` set). For the
+	/// model→engine lowering path this holds by construction — Slice 1
+	/// already auto-registers the propagator on the first edge.
 	fn diff_lit(&self, ctx: &mut SolvingContext<'_>, other: Self, d: IntVal) -> View<bool> {
-		use crate::solver::view::boolean::BoolView;
-
 		let x: View<IntVal> = (*self).into();
 		let y: View<IntVal> = other.into();
 
@@ -174,21 +172,7 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 			return !*b;
 		}
 
-		// 2. Endpoint-interning precondition.
-		{
-			let graph = ctx.state.diff_logic_graph.borrow();
-			if !graph.int_var_to_node.contains_key(&x) || !graph.int_var_to_node.contains_key(&y) {
-				panic!(
-					"IntDecisionActions::diff_lit on SolvingContext: both endpoints must already \
-					 be interned in the diff-logic graph (i.e. appear in a constraint posted at \
-					 lowering time). Mid-search introduction of brand-new endpoints requires the \
-					 advisor-subscription helper, which has not landed yet. Got x={:?}, y={:?}",
-					x, y
-				);
-			}
-		}
-
-		// 3. Probe forward chain neighbours BEFORE allocating.
+		// 2. Probe forward chain neighbours BEFORE allocating.
 		let prev_b = ctx
 			.state
 			.diff_lit_map
@@ -200,6 +184,25 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 			.get(&(x, y))
 			.and_then(|m| m.range((d + 1)..).next().map(|(_, &b)| b));
 
+		// 3. Intern endpoints; subscribe bounds advisor on newly-interned endpoints so
+		//    future bound changes wake the propagator. `Rc::clone` decouples the graph
+		//    borrow from the simultaneous `&mut ctx.state.trail` borrow.
+		let graph_rc = std::rc::Rc::clone(&ctx.state.diff_logic_graph);
+		let (x_node, x_was_new, y_node, y_was_new) = {
+			let mut graph = graph_rc.borrow_mut();
+			let x_present = graph.int_var_to_node.contains_key(&x);
+			let y_present = graph.int_var_to_node.contains_key(&y);
+			let x_node = graph.intern_int(&mut ctx.state.trail, x);
+			let y_node = graph.intern_int(&mut ctx.state.trail, y);
+			(x_node, !x_present, y_node, !y_present)
+		};
+		if x_was_new {
+			ctx.subscribe_diff_logic_int_bounds_advisor(x, x_node as u64);
+		}
+		if y_was_new {
+			ctx.subscribe_diff_logic_int_bounds_advisor(y, y_node as u64);
+		}
+
 		// 4. Allocate a fresh SAT variable for the new gate.
 		let raw_var = ctx.slv.new_observed_var();
 		ctx.state.statistics.lazy_literals += 1;
@@ -207,17 +210,24 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 		let new_lit: pindakaas::Lit = raw_var.into();
 		let b: View<bool> = View(BoolView::Lit(Decision(new_lit)));
 
-		// 5. Register both gated edges in the diff-logic graph. `Rc::clone` lets us
-		//    hold the graph borrow simultaneously with `&mut ctx.state.trail`, since
-		//    they are independent cells.
-		let graph_rc = std::rc::Rc::clone(&ctx.state.diff_logic_graph);
-		{
+		// 5. Register both gated edges + intern the gate Boolean (and its negation)
+		//    into the graph so the propagator can index them.
+		let (gate_node, neg_node) = {
 			let mut graph = graph_rc.borrow_mut();
+			let gate_node = graph.intern_bool(&mut ctx.state.trail, b);
+			let neg_node = graph.intern_bool(&mut ctx.state.trail, !b);
 			let _ = graph.register_edge(&mut ctx.state.trail, x, y, d, Some(b));
 			let _ = graph.register_edge(&mut ctx.state.trail, y, x, -d - 1, Some(!b));
-		}
+			(gate_node, neg_node)
+		};
 
-		// 6. Populate cache in BOTH directions.
+		// 6. Subscribe a "fixed" advisor on both gate variants so SAT decisions on the
+		//    new gate wake the propagator. The data payload matches the bool-node index
+		//    the propagator passes to `advise_bool_fixed`.
+		ctx.subscribe_diff_logic_bool_fixed_advisor(b, gate_node as u64);
+		ctx.subscribe_diff_logic_bool_fixed_advisor(!b, neg_node as u64);
+
+		// 7. Populate cache in BOTH directions.
 		let _ = ctx
 			.state
 			.diff_lit_map
@@ -231,9 +241,8 @@ impl IntDecisionActions<SolvingContext<'_>> for Decision<IntVal> {
 			.or_default()
 			.insert(-d - 1, !b);
 
-		// 7. Push order-encoding chain implication clauses to the SAT solver via
-		//    `state.clauses` (same mechanism the unary `IntDecisionActions::lit` uses
-		//    for `defining_clauses`). `a → b` becomes `¬a ∨ b`.
+		// 8. Push order-encoding chain implication clauses to the SAT solver via
+		//    `state.clauses`. `a → b` becomes `¬a ∨ b`.
 		let as_raw = |v: View<bool>| -> pindakaas::Lit {
 			match v.0 {
 				BoolView::Lit(d) => d.0,
@@ -358,6 +367,91 @@ impl<'a> SolvingContext<'a> {
 			slv,
 			state,
 			current_prop: PropRef::INVALID,
+		}
+	}
+
+	/// Mid-search analogue of
+	/// [`InitializationContext::add_lit_advisor`]
+	/// targeting the diff-logic propagator. Subscribes a fixed-event
+	/// advisor on the given Boolean view so SAT decisions on it wake the
+	/// propagator. No-op for `Const`-flavoured views and for literals
+	/// already fixed on the trail.
+	pub(crate) fn subscribe_diff_logic_bool_fixed_advisor(&mut self, view: View<bool>, data: u64) {
+		let prop_ref = self.state.diff_logic_graph.borrow().propagator_ref.expect(
+			"diff-logic propagator must be initialised before subscribing mid-search advisors",
+		);
+		let lit = match view.0 {
+			BoolView::Lit(l) => l,
+			BoolView::Const(_) => return,
+		};
+		if lit.val(&self.state.trail).is_some() {
+			// already fixed — advisor never fires
+			return;
+		}
+		self.state.advisors.push(AdvisorDef {
+			bool2int: false,
+			data,
+			negated: false,
+			propagator: prop_ref,
+		});
+		let adv = AdvRef::new(self.state.advisors.len() - 1);
+		self.state
+			.bool_activation
+			.entry(lit.0.var())
+			.or_default()
+			.push(ActivationAction::<AdvRef, PropRef>::Advise(adv).into());
+	}
+
+	/// Mid-search analogue of the diff-logic propagator's
+	/// initialisation-time `View<IntVal>::advise_when(ctx, Bounds, data)`.
+	/// Subscribes a bounds advisor on the given int view so future
+	/// bound changes wake the propagator. Constants are a no-op.
+	pub(crate) fn subscribe_diff_logic_int_bounds_advisor(
+		&mut self,
+		view: View<IntVal>,
+		data: u64,
+	) {
+		let prop_ref = self.state.diff_logic_graph.borrow().propagator_ref.expect(
+			"diff-logic propagator must be initialised before subscribing mid-search advisors",
+		);
+		match view.0 {
+			IntView::Linear(lin) => {
+				let negated = lin.scale.is_negative();
+				self.state.advisors.push(AdvisorDef {
+					bool2int: false,
+					data,
+					negated,
+					propagator: prop_ref,
+				});
+				let adv = AdvRef::new(self.state.advisors.len() - 1);
+				self.state.int_activation[lin.var.idx()].add(
+					ActivationAction::<AdvRef, PropRef>::Advise(adv),
+					IntPropCond::Bounds,
+				);
+			}
+			IntView::Const(_) => {
+				// constant — no advisor needed
+			}
+			IntView::Bool(lin) => {
+				// Bool-as-int: subscribe a fixed advisor on the underlying
+				// literal with `bool2int: true` so the engine routes the
+				// event through `advise_of_int_change`.
+				if lin.var.val(&self.state.trail).is_some() {
+					return;
+				}
+				self.state.advisors.push(AdvisorDef {
+					bool2int: true,
+					data,
+					negated: false,
+					propagator: prop_ref,
+				});
+				let adv = AdvRef::new(self.state.advisors.len() - 1);
+				self.state
+					.bool_activation
+					.entry(lin.var.0.var())
+					.or_default()
+					.push(ActivationAction::<AdvRef, PropRef>::Advise(adv).into());
+			}
 		}
 	}
 

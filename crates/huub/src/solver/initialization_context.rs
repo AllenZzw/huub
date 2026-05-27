@@ -32,7 +32,7 @@ pub struct InitializationContext<'a> {
 	pub(crate) state: &'a mut State,
 	/// Internal propagator reference used to add propagator to activations
 	/// lists.
-	prop: PropRef,
+	pub(crate) prop: PropRef,
 	/// The priority level at which the propagator will be enqueued.
 	priority: PriorityLevel,
 	/// Whether to enqueue `on_change` subscriptions of the propagator would

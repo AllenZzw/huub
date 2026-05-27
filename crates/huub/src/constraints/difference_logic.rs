@@ -152,6 +152,11 @@ pub(crate) struct DiffLogicState {
 	/// Whether the diff-logic propagator has been pushed to the engine
 	/// already. Set on the first `Solver::add_diff_logic_edge`.
 	pub(crate) propagator_registered: bool,
+	/// The diff-logic propagator's `PropRef`, recorded by
+	/// `DifferenceLogicPropagator::initialize`. Needed by mid-search
+	/// advisor subscription so newly-introduced int endpoints and gate
+	/// Booleans can be wired to wake the same propagator.
+	pub(crate) propagator_ref: Option<crate::solver::engine::PropRef>,
 }
 
 impl DiffLogicState {
@@ -1034,6 +1039,11 @@ impl Propagator<Engine> for DifferenceLogicPropagator {
 		&mut self,
 		ctx: &mut <Engine as crate::actions::ReasoningEngine>::InitializationContext<'_>,
 	) {
+		// Record the propagator's `PropRef` so mid-search advisor
+		// subscriptions (via `SolvingContext::subscribe_diff_logic_*`)
+		// can wake this propagator on newly-introduced endpoints and
+		// gating Booleans.
+		self.graph.borrow_mut().propagator_ref = Some(ctx.prop);
 		let graph = self.graph.borrow();
 		// Low default chosen empirically: running diff-logic *after* other
 		// Medium-priority propagators (disjunctive, cumulative) lets them
@@ -2657,5 +2667,85 @@ mod tests {
 			map2.get(&mut slv2, b2),
 			"subsumed Boolean must alias-resolve to the canonical"
 		);
+	}
+
+	#[test]
+	fn mid_search_diff_lit_introduces_new_endpoint() {
+		// Variant of `mid_search_diff_lit_lazy_creation_on_solver`
+		// where one of the endpoints (z) was NOT in any diff-logic
+		// constraint at lowering time. `SolvingContext::diff_lit` must
+		// intern z into the graph mid-search AND subscribe the
+		// diff-logic propagator's bounds advisor on z. Sanity-check
+		// that (a) the graph contains z as a node, (b) the cache holds
+		// the new (x, z, 0) entry, (c) one advisor has been added
+		// targeting z's int_activation list.
+		use crate::{
+			actions::IntDecisionActions,
+			solver::{Solver, view::integer::IntView},
+		};
+
+		let mut model = diff_logic_enabled_model();
+		let x = model.new_int_decision(0..=10);
+		let y = model.new_int_decision(0..=10);
+		// `z` is declared but NEVER appears in any diff-logic constraint
+		// — only the (x, y) pair is interned at lowering.
+		let z = model.new_int_decision(0..=10);
+		let xv: crate::model::View<IntVal> = x.into();
+		let yv: crate::model::View<IntVal> = y.into();
+		let _ = model.diff_logic_branching(vec![xv, yv]);
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+
+		let sx_view = map.get(&mut slv, xv);
+		let sz_view = map.get(&mut slv, crate::model::View::<IntVal>::from(z));
+		let (sx_dec, sz_dec) = match (sx_view.0, sz_view.0) {
+			(IntView::Linear(lin_x), IntView::Linear(lin_z)) => (lin_x.var, lin_z.var),
+			_ => panic!("expected Linear views from the lowering map"),
+		};
+
+		// Snapshot pre-state.
+		let advisors_before = slv.engine.borrow().state.advisors.len();
+
+		// Lazy-create `x − z ≤ 0` — introduces z to the graph mid-search.
+		let _b = sx_dec.diff_lit(&mut slv, sz_dec, 0);
+
+		// (a) z is now a graph node.
+		{
+			let engine = slv.engine.borrow();
+			let graph = engine.state.diff_logic_graph.borrow();
+			assert!(
+				graph.int_var_to_node.contains_key(&sz_view),
+				"z should be interned into the diff-logic graph after mid-search diff_lit"
+			);
+		}
+		// (b) cache holds the new entry.
+		{
+			let engine = slv.engine.borrow();
+			let cached = engine
+				.state
+				.diff_lit_map
+				.get(&(sx_view, sz_view))
+				.and_then(|m| m.get(&0))
+				.copied();
+			assert!(
+				cached.is_some(),
+				"(x, z, 0) must be in the diff-logic literal cache after lazy creation"
+			);
+		}
+		// (c) new advisors have been registered (the bounds advisor on
+		//     z plus the two fixed advisors on the new gate Boolean +
+		//     its negation = 3 in the simplest case; we just check
+		//     monotone growth).
+		{
+			let engine = slv.engine.borrow();
+			assert!(
+				engine.state.advisors.len() > advisors_before,
+				"expected new AdvisorDefs after mid-search introduction of z (got before={}, after={})",
+				advisors_before,
+				engine.state.advisors.len(),
+			);
+			// Suppress unused-binding warning when assert! short-circuits.
+			let _ = sz_dec;
+		}
 	}
 }
