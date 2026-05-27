@@ -50,7 +50,7 @@ use crate::{
 		IntInspectionActions, PostingActions, ReasoningContext, ReasoningEngine, Trailed,
 		TrailingActions,
 	},
-	constraints::{BoxedPropagator, Conflict},
+	constraints::{BoxedPropagator, Conflict, difference_logic::DiffLogicState},
 	helpers::bytes::Bytes,
 	solver::{
 		branchers::BoxedBrancher,
@@ -276,14 +276,12 @@ pub struct Solver<Sat = Cadical> {
 	/// external propagation.
 	pub(crate) sat: Sat,
 	/// A reference to the [`Engine`] instance that is connected to
-	/// [`Self::sat`].
+	/// [`Self::sat`]. The diff-logic graph (used by the
+	/// [`crate::constraints::difference_logic::DifferenceLogicPropagator`],
+	/// the pair brancher's lookup, and mid-search lazy edge creation)
+	/// lives on `engine.borrow().state.diff_logic_graph`; consumers
+	/// clone the `Rc` from there.
 	pub(crate) engine: Rc<RefCell<Engine>>,
-	/// Shared difference-logic graph. Always present; empty until
-	/// [`Self::add_diff_logic_edge`] is called. Cloned (`Rc::clone`) into
-	/// the [`crate::constraints::difference_logic::DifferenceLogicPropagator`]
-	/// when the first edge auto-registers it, and into future brancher /
-	/// lazy-literal-hook consumers.
-	pub(crate) diff_logic_graph: Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>>,
 }
 
 /// Structure capturing statistical information about the solver instance and
@@ -1046,10 +1044,12 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 	/// before the propagator's `initialize` subscribes advisors.
 	pub(crate) fn intern_diff_logic_int(&mut self, view: View<IntVal>) {
 		let mut handle = self.engine.borrow_mut();
-		let _ = self
+		let engine = &mut *handle;
+		let _ = engine
+			.state
 			.diff_logic_graph
 			.borrow_mut()
-			.intern_int(&mut handle.state.trail, view);
+			.intern_int(&mut engine.state.trail, view);
 	}
 
 	/// Intern a gating Boolean into the shared diff-logic graph without
@@ -1057,10 +1057,12 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 	/// [`Self::intern_diff_logic_int`].
 	pub(crate) fn intern_diff_logic_bool(&mut self, view: View<bool>) {
 		let mut handle = self.engine.borrow_mut();
-		let _ = self
+		let engine = &mut *handle;
+		let _ = engine
+			.state
 			.diff_logic_graph
 			.borrow_mut()
-			.intern_bool(&mut handle.state.trail, view);
+			.intern_bool(&mut engine.state.trail, view);
 	}
 
 	pub(crate) fn add_diff_logic_edge(
@@ -1073,31 +1075,22 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		use crate::constraints::difference_logic::DifferenceLogicPropagator;
 
 		let needs_register;
+		let graph_rc;
 		{
 			let mut handle = self.engine.borrow_mut();
-			let mut graph = self.diff_logic_graph.borrow_mut();
-			let _ = graph.register_edge(&mut handle.state.trail, x, y, d, gate);
+			let engine = &mut *handle;
+			graph_rc = Rc::clone(&engine.state.diff_logic_graph);
+			let mut graph = engine.state.diff_logic_graph.borrow_mut();
+			let _ = graph.register_edge(&mut engine.state.trail, x, y, d, gate);
 			needs_register = !graph.propagator_registered;
 			if needs_register {
 				graph.propagator_registered = true;
 			}
 		}
 		if needs_register {
-			let prop = Box::new(DifferenceLogicPropagator {
-				graph: Rc::clone(&self.diff_logic_graph),
-			});
+			let prop = Box::new(DifferenceLogicPropagator { graph: graph_rc });
 			self.add_propagator(prop, true);
 		}
-	}
-
-	/// Access the shared diff-logic graph. Used by
-	/// [`crate::model::deserialize::Branching::to_solver`] to look up
-	/// the gates of Reified edges posted by
-	/// [`crate::model::Model::diff_logic_branching`].
-	pub(crate) fn diff_logic_graph(
-		&self,
-	) -> &Rc<RefCell<crate::constraints::difference_logic::DiffLogicState>> {
-		&self.diff_logic_graph
 	}
 
 	/// Add a constraint propagator to the solver to enforce a constraint.
@@ -1419,15 +1412,12 @@ impl Clone for Solver<Cadical> {
 	fn clone(&self) -> Self {
 		let mut sat = self.sat.shallow_clone();
 		let mut engine: Engine = self.engine.borrow().clone();
-		// Deep-clone the diff-logic graph: the cloned solver owns its
-		// own independent graph, sharing nothing with the original. The
-		// cloned `engine` already holds a fresh `Rc<RefCell<...>>`
-		// (because `Engine: Clone` deep-clones the state's `Rc`); we
-		// take a clone of that Rc for the new `Solver.diff_logic_graph`
-		// so the two sides agree on a single cell.
-		engine.state.diff_logic_graph =
-			Rc::new(RefCell::new(self.diff_logic_graph.borrow().clone()));
-		let diff_logic_graph = Rc::clone(&engine.state.diff_logic_graph);
+		// `Engine: Clone` shallow-clones the `Rc` cell (the state's
+		// `diff_logic_graph` still points at the original cell). Replace
+		// it with a deep clone so the cloned solver owns an independent
+		// graph.
+		let cloned_graph: DiffLogicState = engine.state.diff_logic_graph.borrow().clone();
+		engine.state.diff_logic_graph = Rc::new(RefCell::new(cloned_graph));
 		let engine = Rc::new(RefCell::new(engine));
 		sat.connect_propagator(Rc::clone(&engine));
 		for var in sat.emitted_vars() {
@@ -1435,11 +1425,7 @@ impl Clone for Solver<Cadical> {
 				sat.add_observed_var(var);
 			}
 		}
-		Solver {
-			sat,
-			engine,
-			diff_logic_graph,
-		}
+		Solver { sat, engine }
 	}
 }
 
@@ -1461,16 +1447,7 @@ impl<Sat: Default + ExternalPropagation + LearnCallback> Default for Solver<Sat>
 		let engine: Rc<RefCell<Engine>> = Rc::default();
 		sat.set_learn_callback(Some(trace_learned_clause));
 		sat.connect_propagator(Rc::clone(&engine));
-		// Share a single diff-logic graph cell between `Solver` and
-		// `engine::State`. `State::default()` constructs its own empty
-		// `Rc<RefCell<DiffLogicState>>`; we clone that Rc here so both
-		// sides point at the same cell.
-		let diff_logic_graph = Rc::clone(&engine.borrow().state.diff_logic_graph);
-		Self {
-			sat,
-			engine,
-			diff_logic_graph,
-		}
+		Self { sat, engine }
 	}
 }
 
