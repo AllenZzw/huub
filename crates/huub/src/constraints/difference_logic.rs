@@ -2461,8 +2461,8 @@ mod tests {
 		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
 
 		let b1 = xv.diff_lit(&mut model, yv, -1);
 		let b2 = xv.diff_lit(&mut model, yv, -1);
@@ -2479,8 +2479,8 @@ mod tests {
 		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
 
 		let b = xv.diff_lit(&mut model, yv, 3);
 		let b_rev = yv.diff_lit(&mut model, xv, -4);
@@ -2502,9 +2502,9 @@ mod tests {
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
 		let z = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
-		let _branching = model.diff_logic_branching(vec![xv, yv, z.into()]);
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
+		let _branching = model.diff_logic_branching(vec![xv, yv, z]);
 
 		let b_again = xv.diff_lit(&mut model, yv, -1);
 		let cached = model
@@ -2533,8 +2533,8 @@ mod tests {
 		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
 		// Pre-intern the (x, y) endpoints via `diff_logic_branching`
 		// so the SolvingContext-side `diff_lit` finds them in the
 		// graph. Only d=-1 is cached after this call.
@@ -2612,8 +2612,8 @@ mod tests {
 		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
 
 		// First, post a user-side Reified through the subsumption
 		// router. This becomes the canonical Boolean for (x, y, -1).
@@ -2653,8 +2653,8 @@ mod tests {
 		let mut model2 = diff_logic_enabled_model();
 		let x2 = model2.new_int_decision(0..=10);
 		let y2 = model2.new_int_decision(0..=10);
-		let xv2: crate::model::View<IntVal> = x2.into();
-		let yv2: crate::model::View<IntVal> = y2.into();
+		let xv2: crate::model::View<IntVal> = x2;
+		let yv2: crate::model::View<IntVal> = y2;
 		let b1 = model2.new_bool_decision();
 		let b2 = model2.new_bool_decision();
 		model2.add_diff_logic_reified(b1, xv2, yv2, -1);
@@ -2690,14 +2690,14 @@ mod tests {
 		// `z` is declared but NEVER appears in any diff-logic constraint
 		// — only the (x, y) pair is interned at lowering.
 		let z = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x.into();
-		let yv: crate::model::View<IntVal> = y.into();
+		let xv: crate::model::View<IntVal> = x;
+		let yv: crate::model::View<IntVal> = y;
 		let _ = model.diff_logic_branching(vec![xv, yv]);
 
 		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
 
 		let sx_view = map.get(&mut slv, xv);
-		let sz_view = map.get(&mut slv, crate::model::View::<IntVal>::from(z));
+		let sz_view = map.get(&mut slv, z);
 		let (sx_dec, sz_dec) = match (sx_view.0, sz_view.0) {
 			(IntView::Linear(lin_x), IntView::Linear(lin_z)) => (lin_x.var, lin_z.var),
 			_ => panic!("expected Linear views from the lowering map"),

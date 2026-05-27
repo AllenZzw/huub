@@ -651,7 +651,7 @@ impl IntDecisionActions<Model> for View<IntVal> {
 		// Miss: allocate fresh Boolean and route through the shared
 		// `diff_lit_insert` helper (which posts the Reified constraint,
 		// populates the cache in both directions, and emits chain clauses).
-		let b = ctx.new_bool_decision().into();
+		let b = ctx.new_bool_decision();
 		ctx.diff_lit_insert(b, x, y, d);
 		b
 	}
