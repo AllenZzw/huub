@@ -96,9 +96,17 @@ pub(crate) struct DiffLogicState {
 	/// Per gating-Boolean list of implication edges. Indexed by
 	/// `bool_vars` index.
 	pub(crate) bool_implications: Vec<TrailedOpenList<usize>>,
-	/// Trailed counter for the number of currently open implication
-	/// edges. `None` until the first gated edge is registered.
-	pub(crate) num_open_edges: Option<Trailed<usize>>,
+	/// Total number of gated edges ever registered. **Not** trailed: like
+	/// the open lists' `push`, a registered edge is a permanent logical fact
+	/// (its gate just toggles), so this count must survive backtracking past
+	/// a mid-search `register_edge`.
+	pub(crate) num_gated_created: usize,
+	/// Trailed counter for the number of gated edges currently closed (gate
+	/// fixed). The open-edge count is `num_gated_created − num_closed_edges`;
+	/// the difference is `0` exactly when no dormant gated edge remains.
+	/// `None` until the first gated edge is registered. Trailed so closures
+	/// revert on backtrack, mirroring [`TrailedOpenList`]'s own `closed`.
+	pub(crate) num_closed_edges: Option<Trailed<usize>>,
 
 	// ---- Per-node algorithm working buffers (not trailed) ----
 	/// Johnson's potential per node. Computed once on the first call to
@@ -207,10 +215,10 @@ impl DiffLogicState {
 		let from = self.intern_int(trail, x);
 		let to = self.intern_int(trail, y);
 		let bool_var = gate.map(|b| self.intern_bool(trail, b));
-		// Lazily allocate the trailed `num_open_edges` counter on the very
+		// Lazily allocate the trailed `num_closed_edges` counter on the very
 		// first gated edge — it can't be allocated in `Default::default()`.
-		if bool_var.is_some() && self.num_open_edges.is_none() {
-			self.num_open_edges = Some(trail.track(0_usize));
+		if bool_var.is_some() && self.num_closed_edges.is_none() {
+			self.num_closed_edges = Some(trail.track(0_usize));
 		}
 		let mut edge = DiffEdge {
 			from,
@@ -229,9 +237,10 @@ impl DiffLogicState {
 			self.open_out[from].push(idx);
 			edge.in_index = self.open_in[to].len();
 			self.open_in[to].push(idx);
-			let cnt = self.num_open_edges.unwrap();
-			let cur = trail.trailed(cnt);
-			let _ = trail.set_trailed(cnt, cur + 1);
+			// Permanent: the edge now exists for the rest of the search. The
+			// open lists' `push` above is likewise untrailed; both must stay
+			// consistent when search backtracks past this `register_edge`.
+			self.num_gated_created += 1;
 		} else {
 			self.active_out[from].push(trail, idx);
 			self.active_in[to].push(trail, idx);
@@ -343,7 +352,7 @@ impl DiffLogicState {
 	/// Close a gated edge: remove it from the dormant lists and decrement
 	/// the open-edge counter. Called when the gate is fixed (either true
 	/// after activation, or false).
-	fn close_imp_edge(&mut self, ctx: &mut SolvingContext<'_>, e: usize) {
+	fn close_imp_edge<A: TrailingActions>(&mut self, ctx: &mut A, e: usize) {
 		let edge = &self.edges[e];
 		let b = edge.bool_var.unwrap();
 		let to = edge.to;
@@ -357,9 +366,9 @@ impl DiffLogicState {
 			& self.open_out[from].close(ctx, out_index, |&e, i| edges[e].out_index = i)
 			& self.open_in[to].close(ctx, in_index, |&e, i| edges[e].in_index = i);
 		debug_assert!(was_open);
-		let cnt = self.num_open_edges.unwrap();
+		let cnt = self.num_closed_edges.unwrap();
 		let cur = ctx.trailed(cnt);
-		let _ = ctx.set_trailed(cnt, cur - 1);
+		let _ = ctx.set_trailed(cnt, cur + 1);
 	}
 
 	/// Build the explanation for a negative cycle reaching `node` during
@@ -635,7 +644,10 @@ impl DiffLogicState {
 		ctx: &mut SolvingContext<'_>,
 		new_index: usize,
 	) -> Result<(), Conflict<Decision<bool>>> {
-		if ctx.trailed(self.num_open_edges.unwrap()) == 0 {
+		// No dormant gated edge remains when every created one is closed.
+		// `None` ⇒ no gated edge was ever registered ⇒ nothing open.
+		let num_closed = self.num_closed_edges.map_or(0, |c| ctx.trailed(c));
+		if self.num_gated_created == num_closed {
 			return Ok(());
 		}
 
@@ -1157,4 +1169,60 @@ fn explain_diff_logic_lazy(
 		diff.int_vars[edge.from].lit_relaxed(ctx, IntLitMeaning::GreaterEq(source_lb));
 	let (lit_to, _) = diff.int_vars[edge.to].lit_relaxed(ctx, IntLitMeaning::Less(target_ub + 1));
 	vec![lit_from, lit_to]
+}
+
+#[cfg(test)]
+mod tests {
+	use std::num::NonZeroI32;
+
+	use pindakaas::Lit as RawLit;
+
+	use super::*;
+	use crate::solver::{
+		trail::Trail,
+		view::{boolean::BoolView, integer::IntView},
+	};
+
+	/// Regression test for the trail-safety of the gated-edge open counter.
+	///
+	/// A gated edge created at a non-root decision level must keep being
+	/// counted after search backtracks past its creation: the open lists'
+	/// `push` is untrailed, so the created-count has to be untrailed too.
+	/// Previously the count lived in a single *trailed* `num_open_edges`
+	/// incremented in `register_edge`; backtracking reverted it while the edge
+	/// persisted, so the next `close_imp_edge` computed `0 - 1` and aborted.
+	/// With the `num_gated_created` (permanent) / `num_closed_edges` (trailed)
+	/// split, the close is well-defined.
+	#[test]
+	fn gated_edge_counter_survives_backtrack_past_creation() {
+		let mut trail = Trail::default();
+		let mut g = DiffLogicState::default();
+
+		let x: View<IntVal> = View(IntView::Const(1));
+		let y: View<IntVal> = View(IntView::Const(2));
+		let gate: View<bool> = View(BoolView::Lit(Decision(RawLit::from_raw(
+			NonZeroI32::new(1).unwrap(),
+		))));
+
+		// Create a gated edge mid-search (decision level 1).
+		trail.notify_new_decision_level();
+		let e = g.register_edge(&mut trail, x, y, 0, Some(gate));
+		assert_eq!(g.num_gated_created, 1);
+
+		// Backtrack past the edge's creation. The edge stays in the (untrailed)
+		// open lists, so the created-count must stay too.
+		trail.notify_backtrack(0);
+		assert_eq!(
+			g.num_gated_created, 1,
+			"created count must survive backtracking past register_edge"
+		);
+
+		// Closing the still-open edge must not underflow the counter (this is
+		// the line that panicked before the fix).
+		g.close_imp_edge(&mut trail, e);
+		let closed = trail.trailed(g.num_closed_edges.unwrap());
+		assert_eq!(closed, 1);
+		// open == created - closed == 0, computed without underflow.
+		assert_eq!(g.num_gated_created - closed, 0);
+	}
 }
