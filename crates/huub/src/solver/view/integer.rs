@@ -41,6 +41,19 @@ impl DefaultView for IntVal {
 impl private::Sealed for IntVal {}
 
 impl View<IntVal> {
+	/// Whether this view is a valid [`IntDecisionActions::diff_lit`] /
+	/// [`IntPropagationActions::tighten_difference`] endpoint.
+	///
+	/// Difference logic relates two integer-graph nodes with unit coefficients,
+	/// so only a **unit-scaled `Linear`** view qualifies: a `Bool`-backed view
+	/// has no integer node, a scaled `Linear` is a general linear term (no
+	/// single edge), and a `Const` is a unary bound. Callers that may hold
+	/// arbitrary views (the diff-logic brancher, the disjunctive precedence
+	/// emitter) use this to skip incompatible pairs instead of panicking.
+	pub(crate) fn is_diff_lit_endpoint(&self) -> bool {
+		matches!(self.0, IntView::Linear(lin) if lin.scale.get() == 1)
+	}
+
 	/// Returns an integer that can be used to identify the associated integer
 	/// decision variable and whether the integer view is a view on another
 	/// decision variable.

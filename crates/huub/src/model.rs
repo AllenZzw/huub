@@ -146,6 +146,12 @@ pub struct Model {
 	/// Reified). Higher levels admit more variants; level `0` disables
 	/// diff-logic routing entirely.
 	pub(crate) diff_logic_level: u8,
+	/// Set when a posted constraint will emit difference-logic edges during
+	/// search (currently the `disjunctive` constraint with detectable
+	/// precedences enabled). Read at lowering time to register the global
+	/// difference-logic propagator even when no two-term linears were routed
+	/// into the edge collection. Independent of [`Model::diff_logic_level`].
+	pub(crate) has_diff_logic_emitter: bool,
 	/// Raw difference-logic constraints accumulated during model
 	/// construction. Drained at lowering time by
 	/// [`Model::lower_diff_logic`].
@@ -175,6 +181,7 @@ impl Default for Model {
 			bool_events: Vec::new(),
 			advisors: Vec::new(),
 			diff_logic_level: 1,
+			has_diff_logic_emitter: false,
 			diff_logic_constraints: Vec::new(),
 			diff_lit_map: FxHashMap::default(),
 		}

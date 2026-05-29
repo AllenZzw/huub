@@ -1093,6 +1093,37 @@ impl<Sat: ExternalPropagation> Solver<Sat> {
 		}
 	}
 
+	/// Ensure the
+	/// [`DifferenceLogicPropagator`](crate::constraints::difference_logic::DifferenceLogicPropagator)
+	/// is registered without adding an edge. Needed when a model emits
+	/// diff-logic edges only at search time (e.g. a disjunctive constraint
+	/// with detectable precedence) but posts no model-time edges: mid-search
+	/// [`IntPropagationActions::tighten_difference`](crate::actions::IntPropagationActions::tighten_difference)
+	/// subscribes advisors via `propagator_ref`, which is only set once the
+	/// propagator is registered. No-op if already registered. Must be called
+	/// after model-time endpoints are interned so the propagator's one-shot
+	/// `initialize` still sees them.
+	pub(crate) fn ensure_diff_logic_propagator(&mut self) {
+		use crate::constraints::difference_logic::DifferenceLogicPropagator;
+
+		let needs_register;
+		let graph_rc;
+		{
+			let mut handle = self.engine.borrow_mut();
+			let engine = &mut *handle;
+			graph_rc = Rc::clone(&engine.state.diff_logic_graph);
+			let mut graph = engine.state.diff_logic_graph.borrow_mut();
+			needs_register = !graph.propagator_registered;
+			if needs_register {
+				graph.propagator_registered = true;
+			}
+		}
+		if needs_register {
+			let prop = Box::new(DifferenceLogicPropagator { graph: graph_rc });
+			self.add_propagator(prop, true);
+		}
+	}
+
 	/// Add a constraint propagator to the solver to enforce a constraint.
 	pub(crate) fn add_propagator(&mut self, propagator: BoxedPropagator, from_model: bool) {
 		let mut handle = self.engine.borrow_mut();

@@ -498,6 +498,7 @@ impl LowererComplete<&mut Model> {
 		//    Without this, later-interned endpoints would never get advisors (the
 		//    propagator's `initialize` only fires once).
 		// 2. Register the edges themselves.
+		let had_diff_logic_edges = diff_logic_edges.is_some();
 		if let Some(edges) = diff_logic_edges {
 			for edge in &edges {
 				let xv = map.get(&mut slv, edge.x);
@@ -515,6 +516,41 @@ impl LowererComplete<&mut Model> {
 				let gate = edge.gate.map(|g| map.get(&mut slv, g));
 				slv.add_diff_logic_edge(xv, yv, edge.d, gate);
 			}
+		}
+
+		// The global difference-logic propagator must exist whenever edges can
+		// reach it — either from the model-time collection (`had_diff_logic_edges`)
+		// or from a constraint that emits edges only during search
+		// (`has_diff_logic_emitter`, e.g. a disjunctive constraint with the
+		// `diff_logic_precedence` rule). If the collection produced edges the
+		// propagator already auto-registered while adding the first one; for the
+		// emitter-only case it would otherwise be missing, and the first
+		// mid-search `tighten_difference` would panic while subscribing
+		// advisors. Register it now — after model-time endpoints are interned,
+		// so the propagator's one-shot `initialize` still sees them.
+		//
+		// These two sources are decoupled from `diff_logic_level`, which now
+		// governs only whether two-term linears are routed into the collection.
+		if had_diff_logic_edges || model.has_diff_logic_emitter {
+			slv.ensure_diff_logic_propagator();
+		}
+
+		// Surface the corner cases where the user's intent and the resulting
+		// configuration disagree.
+		if model.diff_logic_level > 0 && !had_diff_logic_edges && !model.has_diff_logic_emitter {
+			tracing::warn!(
+				diff_logic_level = model.diff_logic_level,
+				"difference logic routing is enabled but no difference logic propagator is \
+				 registered: no two-term linear constraints were routed and no constraint emits \
+				 edges during search"
+			);
+		}
+		if model.has_diff_logic_emitter && model.diff_logic_level == 0 {
+			tracing::warn!(
+				"difference logic propagator enabled because a posted constraint (e.g. \
+				 disjunctive with the diff_logic_precedence rule) emits edges during search, even \
+				 though difference logic routing is disabled (diff_logic_level = 0)"
+			);
 		}
 
 		// Translate model-side `diff_lit_map` into the engine-side
