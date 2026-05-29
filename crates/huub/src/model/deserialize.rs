@@ -106,27 +106,10 @@ impl Branching {
 				WarmStartBrancher::new_in(slv, decisions);
 			}
 			Branching::DiffLogic(vars) => {
+				// The brancher allocates the pair gates lazily during search, so
+				// no gates need to be looked up here — just hand it the views.
 				let solver_vars: Vec<_> = vars.iter().map(|v| map.get(slv, *v)).collect();
-				let n = solver_vars.len();
-				let mut pair_bools = Vec::with_capacity(n * n.saturating_sub(1) / 2);
-				{
-					let engine = slv.engine.borrow();
-					for i in 0..n {
-						for j in (i + 1)..n {
-							let gate = engine
-								.state
-								.diff_lit_map
-								.get(&(solver_vars[i], solver_vars[j]))
-								.and_then(|chain| chain.get(&-1).copied())
-								.expect(
-									"Branching::DiffLogic constructed without prior \
-									 diff_logic_branching post for this pair",
-								);
-							pair_bools.push(gate);
-						}
-					}
-				}
-				DiffLogicBrancher::new_in(slv, solver_vars, pair_bools);
+				DiffLogicBrancher::new_in(slv, solver_vars);
 			}
 		}
 	}

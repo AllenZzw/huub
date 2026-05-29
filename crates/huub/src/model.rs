@@ -672,34 +672,26 @@ impl Model {
 			.collect()
 	}
 
-	/// Declare a diff-logic pair-based brancher over the given integer
-	/// array. For each pair `(i, j)` with `i < j`, allocate a fresh
-	/// reified Boolean `b_{ij}` and post `Reified(b_{ij}, x_i, x_j, -1)`
-	/// (i.e. `b_{ij} ↔ (x_i < x_j)`) into `self.diff_logic_constraints`.
-	/// The returned [`crate::model::deserialize::Branching::DiffLogic`]
-	/// can be passed to
+	/// Declare a diff-logic pair-based brancher over the given integer array.
+	/// For each pair `(i, j)` with `i < j` the brancher does two-way branching
+	/// on `x_i < x_j` vs `x_i ≥ x_j` via the diff-logic gate of
+	/// `x_i − x_j ≤ −1`. The returned
+	/// [`crate::model::deserialize::Branching::DiffLogic`] can be passed to
 	/// `Branching::to_solver` (or composed via `Branching::Seq`) after
-	/// lowering — `to_solver` recovers the pair Booleans by looking up
-	/// the gated edges this method posted.
+	/// lowering.
 	///
-	/// Subsumption: if `b_{ij}` is logically equivalent to an existing
-	/// diff-logic gate (e.g. one posted by a disjunctive constraint),
-	/// the call to `View<IntVal>::diff_lit` aliases the new Boolean
-	/// onto the canonical one and emits no new SAT variable. Chain
-	/// implication clauses are posted between order-encoding neighbours
-	/// at insertion time.
+	/// The pair gates are **not** allocated here: the
+	/// [`crate::solver::branchers::DiffLogicBrancher`] creates each one lazily
+	/// (via `diff_lit`, get-or-create) the first time it branches on that pair
+	/// during search. This method only records that a diff-logic edge emitter
+	/// is present (`has_diff_logic_emitter`) so lowering registers the global
+	/// difference-logic propagator, which is required for a fixed gate to
+	/// enforce its order. Lazy creation still benefits from subsumption: if a
+	/// gate for the pair already exists (e.g. from a disjunctive constraint),
+	/// the brancher's `diff_lit` aliases onto it via the engine's `diff_lit`
+	/// cache.
 	pub fn diff_logic_branching(&mut self, vars: Vec<View<IntVal>>) -> deserialize::Branching {
-		use crate::{actions::IntDecisionActions, model::deserialize};
-
-		let n = vars.len();
-		for i in 0..n {
-			for j in (i + 1)..n {
-				// diff_lit posts the Reified constraint *and* checks
-				// the chain map, aliasing onto any existing canonical
-				// Boolean.
-				let _ = vars[i].diff_lit(self, vars[j], -1);
-			}
-		}
+		self.has_diff_logic_emitter = true;
 		deserialize::Branching::DiffLogic(vars)
 	}
 

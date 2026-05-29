@@ -69,6 +69,9 @@ pub enum AnnotationIdent {
 	/// propagator alongside for disjunctive constraint.
 	/// Note: this propagator emits difference-logic constraints.
 	DisjDiffLogicPrec,
+	/// "huub_diff_logic_search" search annotation selecting the pair-based
+	/// difference-logic brancher over an integer-variable array.
+	DiffLogicSearch,
 	/// "int_search" annotation for integer search strategies.
 	IntSearch,
 	/// "seq_search" annotation for sequential search strategies.
@@ -372,6 +375,7 @@ impl AnnotationIdent {
 			Self::ConsistencyBounds => "bounds",
 			Self::ConsistencyDomain => "domain",
 			Self::ConsistencyValue => "value_propagation",
+			Self::DiffLogicSearch => "huub_diff_logic_search",
 			Self::DisjDetectPrec => "detectable_precedence",
 			Self::DisjDiffLogicPrec => "diff_logic_precedence",
 			Self::DisjEdgeFinding => "edge_finding",
@@ -412,6 +416,7 @@ impl TryFrom<&str> for AnnotationIdent {
 			"detectable_precedence" => Ok(Self::DisjDetectPrec),
 			"diff_logic_precedence" => Ok(Self::DisjDiffLogicPrec),
 			"domain" => Ok(Self::ConsistencyDomain),
+			"huub_diff_logic_search" => Ok(Self::DiffLogicSearch),
 			"edge_finding" => Ok(Self::DisjEdgeFinding),
 			"first_fail" => Ok(Self::VarSelFirstFail),
 			"indomain" => Ok(Self::ValSelIndomain),
@@ -771,6 +776,27 @@ impl<'a> FznModelBuilder<'a> {
 							name: ann.as_str(),
 							found: c.args.len(),
 							expected: 4,
+						})
+					};
+				}
+				AnnotationIdent::DiffLogicSearch => {
+					return if let [vars] = c.args.as_slice() {
+						let vars = self
+							.ann_arg_var_array(vars)?
+							.iter()
+							.map(|l| self.lit_int(l))
+							.try_collect()?;
+						// `diff_logic_branching` records the diff-logic emitter
+						// (so lowering registers the global propagator) and
+						// returns the branching; the pair gates are created
+						// lazily by the brancher during search.
+						let branching = self.prb.diff_logic_branching(vars);
+						Ok((Vec::new(), vec![branching]))
+					} else {
+						Err(FlatZincError::InvalidNumArgs {
+							name: ann.as_str(),
+							found: c.args.len(),
+							expected: 1,
 						})
 					};
 				}
@@ -2499,6 +2525,12 @@ mod tests {
 		assert_eq!(
 			AnnotationIdent::try_from(ident.to_string().as_str()),
 			Ok(AnnotationIdent::WarmStartInt)
+		);
+		let ident = AnnotationIdent::DiffLogicSearch;
+		assert_eq!(ident.to_string(), "huub_diff_logic_search");
+		assert_eq!(
+			AnnotationIdent::try_from(ident.to_string().as_str()),
+			Ok(AnnotationIdent::DiffLogicSearch)
 		);
 	}
 

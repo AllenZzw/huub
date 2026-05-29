@@ -1156,29 +1156,31 @@ mod tests {
 	}
 
 	#[test]
-	fn diff_logic_branching_internal_subsumption() {
-		// `diff_logic_branching` for [x, y, z] posts three pairwise
-		// Reified Booleans. A subsequent `diff_lit(x, y, -1)` call
-		// should hit the cache and return the same Boolean the
-		// brancher allocated.
-		use crate::actions::IntDecisionActions;
-
+	fn diff_logic_branching_is_lazy() {
+		// `diff_logic_branching` no longer posts pair Booleans eagerly: the
+		// brancher creates each gate on demand during search. The call only
+		// flags the model so lowering registers the global diff-logic
+		// propagator, and must NOT populate `diff_lit_map` at model time.
 		let mut model = diff_logic_enabled_model();
 		let x = model.new_int_decision(0..=10);
 		let y = model.new_int_decision(0..=10);
 		let z = model.new_int_decision(0..=10);
-		let xv: crate::model::View<IntVal> = x;
-		let yv: crate::model::View<IntVal> = y;
-		let _branching = model.diff_logic_branching(vec![xv, yv, z]);
 
-		let b_again = xv.diff_lit(&mut model, yv, -1);
-		let cached = model
-			.diff_lit_map
-			.get(&(xv, yv))
-			.and_then(|m| m.get(&-1))
-			.copied()
-			.expect("diff_logic_branching should have populated the (x, y, -1) entry");
-		assert_eq!(b_again, cached);
+		assert!(!model.has_diff_logic_emitter);
+		let _branching = model.diff_logic_branching(vec![x, y, z]);
+
+		assert!(
+			model.has_diff_logic_emitter,
+			"diff_logic_branching must flag the model so the propagator registers"
+		);
+		assert!(
+			model.diff_lit_map.get(&(x, y)).is_none(),
+			"diff_logic_branching must not eagerly post any pair Boolean"
+		);
+		assert!(
+			model.diff_logic_constraints.is_empty(),
+			"diff_logic_branching must not eagerly post any diff-logic constraint"
+		);
 	}
 
 	#[test]
