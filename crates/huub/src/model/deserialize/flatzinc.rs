@@ -65,6 +65,10 @@ pub enum AnnotationIdent {
 	/// "detectable_precedence" annotation to detectable precedence propagation
 	/// within the disjunctive propagator.
 	DisjDetectPrec,
+	/// "diff_logic_precedence" annotation to post the timeline precedence
+	/// propagator alongside for disjunctive constraint.
+	/// Note: this propagator emits difference-logic constraints.
+	DisjDiffLogicPrec,
 	/// "int_search" annotation for integer search strategies.
 	IntSearch,
 	/// "seq_search" annotation for sequential search strategies.
@@ -369,6 +373,7 @@ impl AnnotationIdent {
 			Self::ConsistencyDomain => "domain",
 			Self::ConsistencyValue => "value_propagation",
 			Self::DisjDetectPrec => "detectable_precedence",
+			Self::DisjDiffLogicPrec => "diff_logic_precedence",
 			Self::DisjEdgeFinding => "edge_finding",
 			Self::DisjNotLast => "not_last",
 			Self::IntSearch => "int_search",
@@ -405,6 +410,7 @@ impl TryFrom<&str> for AnnotationIdent {
 			"bool_search" => Ok(Self::BoolSearch),
 			"bounds" => Ok(Self::ConsistencyBounds),
 			"detectable_precedence" => Ok(Self::DisjDetectPrec),
+			"diff_logic_precedence" => Ok(Self::DisjDiffLogicPrec),
 			"domain" => Ok(Self::ConsistencyDomain),
 			"edge_finding" => Ok(Self::DisjEdgeFinding),
 			"first_fail" => Ok(Self::VarSelFirstFail),
@@ -1890,22 +1896,36 @@ impl<'a> FznModelBuilder<'a> {
 						.map(|l| self.par_int(l))
 						.try_collect()?;
 
-					let (edge_finding, not_last, detectable_precedence) = match (
-						Self::anns_contains(
-							&c.ann,
-							&mut ann_used,
-							AnnotationIdent::DisjEdgeFinding,
-						),
-						Self::anns_contains(&c.ann, &mut ann_used, AnnotationIdent::DisjNotLast),
-						Self::anns_contains(&c.ann, &mut ann_used, AnnotationIdent::DisjDetectPrec),
-					) {
-						// No annotations found, so we assume the user wants the default
-						// configuration
-						(false, false, false) => (None, None, None),
-						// At least one annotation was found, so we assume missing annotations
-						// disable certain propagation options.
-						(ef, nl, dp) => (Some(ef), Some(nl), Some(dp)),
-					};
+					let (edge_finding, not_last, detectable_precedence, diff_logic_precedence) =
+						match (
+							Self::anns_contains(
+								&c.ann,
+								&mut ann_used,
+								AnnotationIdent::DisjEdgeFinding,
+							),
+							Self::anns_contains(
+								&c.ann,
+								&mut ann_used,
+								AnnotationIdent::DisjNotLast,
+							),
+							Self::anns_contains(
+								&c.ann,
+								&mut ann_used,
+								AnnotationIdent::DisjDetectPrec,
+							),
+							Self::anns_contains(
+								&c.ann,
+								&mut ann_used,
+								AnnotationIdent::DisjDiffLogicPrec,
+							),
+						) {
+							// No annotations found, so we assume the user wants the default
+							// configuration
+							(false, false, false, false) => (None, None, None, None),
+							// At least one annotation was found, so we assume missing
+							// annotations disable certain propagation options.
+							(ef, nl, dp, dlp) => (Some(ef), Some(nl), Some(dp), Some(dlp)),
+						};
 
 					self.prb
 						.disjunctive()
@@ -1914,6 +1934,7 @@ impl<'a> FznModelBuilder<'a> {
 						.maybe_edge_finding_propagation(edge_finding)
 						.maybe_not_last_propagation(not_last)
 						.maybe_detectable_precedence_propagation(detectable_precedence)
+						.maybe_diff_logic_precedence_propagation(diff_logic_precedence)
 						.post()?;
 				}
 				ConstraintIdent::Regular => {

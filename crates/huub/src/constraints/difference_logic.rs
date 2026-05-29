@@ -249,6 +249,46 @@ impl DiffLogicState {
 		idx
 	}
 
+	/// Whether the graph already contains an *active, gateless* edge that
+	/// implies `x − y ≤ d` — an unconditional edge `x → y` whose value
+	/// `d' ≤ d`. Such an edge enforces the difference at least as strongly, so
+	/// a caller about to emit a *gated* `x − y ≤ d` edge can skip it and avoid
+	/// allocating a fresh gating Boolean.
+	///
+	/// Runs in O(out-degree of `x`). Returns `false` when either endpoint is
+	/// not yet known to the graph (then there is no edge between them).
+	///
+	/// This is a deliberately narrow, *direct* subsumption check: it only
+	/// catches the case where a structural model edge coincides with the
+	/// detected precedence on the same pair. It does not perform a transitive
+	/// (Johnson) subsumption check, which would be too costly mid-search.
+	///
+	/// Currently exercised only by tests: wiring it into
+	/// [`crate::constraints::disjunctive::DiffLogicPrecedence`] to skip
+	/// emitting an already-subsumed gated edge needs a handle to this shared
+	/// graph plus a view→node mapping through that generic propagator, which is
+	/// a deferred follow-up (see the emission-site `TODO`).
+	#[allow(dead_code)]
+	pub(crate) fn subsuming_global_edge<Ctx>(
+		&self,
+		ctx: &Ctx,
+		x: View<IntVal>,
+		y: View<IntVal>,
+		d: IntVal,
+	) -> bool
+	where
+		Ctx: TrailingActions,
+	{
+		let (Some(&nx), Some(&ny)) = (self.int_var_to_node.get(&x), self.int_var_to_node.get(&y))
+		else {
+			return false;
+		};
+		self.active_out[nx].iter(ctx).any(|&e| {
+			let edge = &self.edges[e];
+			edge.to == ny && edge.bool_var.is_none() && edge.val <= d
+		})
+	}
+
 	// ---- Visit bookkeeping ----
 
 	fn visit(&mut self, n: usize) {
@@ -1224,5 +1264,41 @@ mod tests {
 		assert_eq!(closed, 1);
 		// open == created - closed == 0, computed without underflow.
 		assert_eq!(g.num_gated_created - closed, 0);
+	}
+
+	/// `subsuming_global_edge` recognises an active, gateless edge that already
+	/// enforces a requested difference at least as strongly, and rejects
+	/// weaker/absent/gated edges and the reverse direction.
+	#[test]
+	fn subsuming_global_edge_only_matches_stronger_gateless_edge() {
+		let mut trail = Trail::default();
+		let mut g = DiffLogicState::default();
+
+		let x: View<IntVal> = View(IntView::Const(1));
+		let y: View<IntVal> = View(IntView::Const(2));
+		let z: View<IntVal> = View(IntView::Const(3));
+
+		// Global (gateless) edge x − y ≤ 5.
+		let _ = g.register_edge(&mut trail, x, y, 5, None);
+
+		// A looser request (d ≥ 5) is subsumed; a tighter one (d < 5) is not.
+		assert!(g.subsuming_global_edge(&trail, x, y, 7));
+		assert!(g.subsuming_global_edge(&trail, x, y, 5));
+		assert!(!g.subsuming_global_edge(&trail, x, y, 4));
+
+		// Reverse direction and absent edges are not subsumed.
+		assert!(!g.subsuming_global_edge(&trail, y, x, 100));
+		assert!(!g.subsuming_global_edge(&trail, x, z, 100));
+
+		// Unknown endpoint short-circuits to false.
+		let w: View<IntVal> = View(IntView::Const(9));
+		assert!(!g.subsuming_global_edge(&trail, w, y, 100));
+
+		// A gated edge is not an unconditional subsumer.
+		let gate: View<bool> = View(BoolView::Lit(Decision(RawLit::from_raw(
+			NonZeroI32::new(1).unwrap(),
+		))));
+		let _ = g.register_edge(&mut trail, x, z, 0, Some(gate));
+		assert!(!g.subsuming_global_edge(&trail, x, z, 100));
 	}
 }

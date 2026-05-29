@@ -15,6 +15,7 @@ use crate::{
 		Constraint, IntModelActions, IntSolverActions, Propagator, ReasonBuilder,
 		SimplificationStatus,
 	},
+	helpers::timeline::TimeLine,
 	lower::{LoweringContext, LoweringError},
 	model,
 	solver::{IntLitMeaning, engine::Engine, queue::PriorityLevel},
@@ -44,6 +45,13 @@ pub struct Disjunctive {
 	///
 	/// Defaults to `false`.
 	pub(crate) detectable_precedence_propagation: Option<bool>,
+	/// Whether to additionally post the linear-time [`DiffLogicPrecedence`]
+	/// propagator, which detects precedences and emits difference-logic edges
+	/// (rather than filtering bounds itself). Independent of the Ω-Θ-tree rules
+	/// above — when enabled it is posted in parallel with them.
+	///
+	/// Defaults to `false`.
+	pub(crate) diff_logic_precedence_propagation: Option<bool>,
 }
 
 /// The propagation rules for the `disjunctive` constraint. This enum is
@@ -188,6 +196,12 @@ impl Disjunctive {
 	pub fn not_last_propagation_enabled(&self) -> bool {
 		self.not_last_propagation.unwrap_or(false)
 	}
+
+	/// Return whether the linear-time [`DiffLogicPrecedence`] propagator will
+	/// be posted when creating a [`Solver`](crate::solver::Solver) object.
+	pub fn diff_logic_precedence_propagation_enabled(&self) -> bool {
+		self.diff_logic_precedence_propagation.unwrap_or(false)
+	}
 }
 
 impl<E> Constraint<E> for Disjunctive
@@ -225,23 +239,49 @@ where
 		let horizon = iter.clone().map(|(v, d)| v.max(slv) + d).max().unwrap();
 		let symmetric_vars: Vec<_> = iter.map(|(v, d)| -*v + (horizon - d)).collect();
 
-		// Add detectable precedence propagators
-		DisjunctivePropagator::post(
-			slv,
-			start_times,
-			self.propagator.durations.clone(),
-			self.edge_finding_propagation_enabled(),
-			self.not_last_propagation_enabled(),
-			self.detectable_precedence_propagation_enabled(),
-		);
-		DisjunctivePropagator::post(
-			slv,
-			symmetric_vars,
-			self.propagator.durations.clone(),
-			self.edge_finding_propagation_enabled(),
-			self.not_last_propagation_enabled(),
-			self.detectable_precedence_propagation_enabled(),
-		);
+		// The linear-time `DiffLogicPrecedence` propagator is posted in parallel
+		// with the Ω-Θ-tree propagators when its annotation enabled it. It
+		// detects precedences, pushes earliest starts to the predecessor-set
+		// completion time (the energy bound), and emits difference-logic edges
+		// for composition with the global graph. It is fully independent of the
+		// Ω-Θ-tree rules below. Edges need unit-scaled `Linear` endpoints, but a
+		// two-value-domain start time lowers to a `Bool`-backed view, so edge
+		// eligibility is computed per task here (where the concrete view is
+		// known) and the bound push covers the rest.
+		if self.diff_logic_precedence_propagation_enabled() {
+			let edge_eligible = start_times
+				.iter()
+				.map(|v| v.is_diff_lit_endpoint())
+				.collect_vec();
+			DiffLogicPrecedence::post(
+				slv,
+				start_times.clone(),
+				self.propagator.durations.clone(),
+				edge_eligible,
+			);
+		}
+
+		if self.detectable_precedence_propagation_enabled()
+			|| self.edge_finding_propagation_enabled()
+			|| self.not_last_propagation_enabled()
+		{
+			DisjunctivePropagator::post(
+				slv,
+				start_times,
+				self.propagator.durations.clone(),
+				self.edge_finding_propagation_enabled(),
+				self.not_last_propagation_enabled(),
+				self.detectable_precedence_propagation_enabled(),
+			);
+			DisjunctivePropagator::post(
+				slv,
+				symmetric_vars,
+				self.propagator.durations.clone(),
+				self.edge_finding_propagation_enabled(),
+				self.not_last_propagation_enabled(),
+				self.detectable_precedence_propagation_enabled(),
+			);
+		}
 
 		Ok(())
 	}
@@ -1172,6 +1212,312 @@ where
 	}
 }
 
+/// A propagator that detects task precedences for the `disjunctive` constraint
+/// in linear time (after sorting) and translates each detected precedence into
+/// a difference-logic edge, leaving all bound propagation to the global
+/// difference-logic propagator.
+///
+/// For tasks `k` and `i`, the precedence `k ≪ i` ("k runs before i") is
+/// *detectable* when `lst_k < ect_i`: were `i` to run first, `k` could not
+/// start before `est_i + p_i = ect_i > lst_k`, contradicting `s_k ≤ lst_k`. So
+/// `k` must precede `i`, which we emit as the edge `s_i ≥ s_k + p_k`, i.e.
+/// `s_k − s_i ≤ −p_k`, via [`IntPropagationActions::tighten_difference`]. The
+/// propagator also performs an overload check using the [`TimeLine`].
+///
+/// This is the detection half of the detectable-precedence rule of Fahimi &
+/// Quimper, *Linear-Time Filtering Algorithms for the Disjunctive Constraint*
+/// (AAAI 2014). Unlike the Ω-Θ-tree rule in [`DisjunctivePropagator`], it emits
+/// persistent, composable edges rather than a one-shot energy bound, and leaves
+/// the actual bound updates to the difference-logic propagator. The two are
+/// mutually exclusive: the Ω-Θ-tree detectable-precedence rule is disabled
+/// whenever this propagator is posted.
+#[derive(Clone, Debug)]
+pub struct DiffLogicPrecedence<I> {
+	/// Start time variables of each task.
+	start_times: Vec<I>,
+	/// Durations of each task.
+	durations: Vec<IntVal>,
+	/// Whether task `i`'s start-time view is a valid `tighten_difference`
+	/// endpoint (a unit-scaled `Linear` view). A start time with a two-value
+	/// domain lowers to a `Bool`-backed view, which has no difference-logic
+	/// graph node; the edge `s_i ≥ s_k + p_k` is emitted only when **both**
+	/// endpoints are eligible (the energy bound push handles all views). See
+	/// [`crate::solver::view::View::is_diff_lit_endpoint`].
+	edge_eligible: Vec<bool>,
+	/// Task indices sorted by non-decreasing latest completion time. Reused and
+	/// re-sorted in place every `propagate` (always a permutation of `0..n`, so
+	/// re-sorting by a fresh key needs no refilling).
+	by_lct: Vec<usize>,
+	/// Task indices sorted by non-decreasing earliest completion time (reused).
+	by_ect: Vec<usize>,
+	/// Task indices sorted by non-decreasing latest start time (reused).
+	by_lst: Vec<usize>,
+}
+
+impl<I> DiffLogicPrecedence<I> {
+	/// Create a new [`DiffLogicPrecedence`] propagator and post it in the
+	/// solver. `edge_eligible[i]` marks whether task `i`'s start time can be a
+	/// difference-logic edge endpoint (computed by the caller, which holds the
+	/// concrete view).
+	pub(crate) fn post<E>(
+		solver: &mut E,
+		start_times: Vec<I>,
+		durations: Vec<IntVal>,
+		edge_eligible: Vec<bool>,
+	) where
+		E: PostingActions + ?Sized,
+		I: IntSolverActions<Engine> + Clone,
+	{
+		let n = start_times.len();
+		debug_assert_eq!(edge_eligible.len(), n);
+		solver.add_propagator(Box::new(Self {
+			start_times,
+			durations,
+			edge_eligible,
+			by_lct: (0..n).collect(),
+			by_ect: (0..n).collect(),
+			by_lst: (0..n).collect(),
+		}));
+	}
+
+	/// Tighten `est_i` up to `bound` — the earliest completion time of the set
+	/// `scheduled` of detected predecessors of task `i` — when that improves
+	/// the current lower bound. This is the energy bound of the detectable
+	/// precedences rule (Fahimi & Quimper, Algorithm 6), which the pairwise
+	/// edges alone cannot express.
+	///
+	/// The reason is the energy certificate the time line read: `i`'s earliest
+	/// start and, for each predecessor `k`, its earliest start (its
+	/// contribution to the completion time) and latest start (which made the
+	/// precedence `k ≪ i` detectable). Sound but non-minimal, mirroring the
+	/// overload-check reason in [`Self::propagate`].
+	fn tighten_to_ect<E>(
+		&self,
+		ctx: &mut E::PropagationContext<'_>,
+		i: usize,
+		bound: IntVal,
+		scheduled: &[usize],
+		est: &[IntVal],
+		lst: &[IntVal],
+	) -> Result<(), E::Conflict>
+	where
+		E: ReasoningEngine,
+		I: IntSolverActions<E>,
+	{
+		if bound <= est[i] {
+			return Ok(());
+		}
+		let mut reason = Vec::with_capacity(2 * scheduled.len() + 1);
+		reason.push(self.start_times[i].lit(ctx, IntLitMeaning::GreaterEq(est[i])));
+		for &k in scheduled {
+			reason.push(self.start_times[k].lit(ctx, IntLitMeaning::GreaterEq(est[k])));
+			reason.push(self.start_times[k].lit(ctx, IntLitMeaning::Less(lst[k] + 1)));
+		}
+		trace!(
+			target: "disjunctive",
+			task = i,
+			updated_est = bound,
+			"push earliest start to predecessor-set completion"
+		);
+		self.start_times[i].tighten_min(ctx, bound, reason)?;
+		Ok(())
+	}
+}
+
+impl<E, I> Propagator<E> for DiffLogicPrecedence<I>
+where
+	E: ReasoningEngine,
+	I: IntSolverActions<E> + Clone,
+{
+	fn initialize(&mut self, ctx: &mut E::InitializationContext<'_>) {
+		ctx.set_priority(PriorityLevel::Low);
+		for v in &self.start_times {
+			v.enqueue_when(ctx, IntPropCond::Bounds);
+		}
+	}
+
+	#[tracing::instrument(
+		name = "diff_logic_precedence",
+		target = "solver",
+		level = "trace",
+		skip(self, ctx)
+	)]
+	fn propagate(&mut self, ctx: &mut E::PropagationContext<'_>) -> Result<(), E::Conflict> {
+		let n = self.start_times.len();
+		if n == 0 {
+			return Ok(());
+		}
+
+		// Snapshot the current bounds. Emitting an edge fixes a gating Boolean
+		// but does not itself move any start-time bound (that is deferred to the
+		// difference-logic propagator), so these snapshots stay valid for the
+		// whole call.
+		let est: Vec<IntVal> = self.start_times.iter().map(|v| v.min(ctx)).collect();
+		let lst: Vec<IntVal> = self.start_times.iter().map(|v| v.max(ctx)).collect();
+		let ect: Vec<IntVal> = (0..n).map(|i| est[i] + self.durations[i]).collect();
+		let lct: Vec<IntVal> = (0..n).map(|i| lst[i] + self.durations[i]).collect();
+
+		// Re-sort the reusable index buffers in place (each stays a permutation
+		// of `0..n`). `sort_unstable_by_key` recomputes the cheap O(1)
+		// array-index key on each comparison; `sort_by_cached_key` would
+		// allocate a temporary key vector per call, defeating the buffer reuse.
+		self.by_lct.sort_by_cached_key(|&i| lct[i]);
+		self.by_ect.sort_by_cached_key(|&i| ect[i]);
+		self.by_lst.sort_by_cached_key(|&i| lst[i]);
+
+		// Overload check (Fahimi & Quimper, §"Overload check"): schedule tasks
+		// on the time line by non-decreasing latest completion time; if the
+		// earliest completion of the scheduled set ever exceeds the current
+		// task's lct, the resource is overloaded.
+		let mut tl = TimeLine::new(&est, &lct, &self.durations);
+		let mut scheduled: Vec<usize> = Vec::with_capacity(n);
+		for idx in 0..n {
+			let i = self.by_lct[idx];
+			tl.schedule_task(i, self.durations[i]);
+			scheduled.push(i);
+			if tl.earliest_completion_time() > lct[i] {
+				// The scheduled tasks cannot all complete by lct_i. Cite each
+				// one's lower bound and the fact it completes by lct_i (a sound,
+				// non-minimal certificate of the overload).
+				trace!(
+					target: "disjunctive",
+					overloaded_task = i,
+					lct_i = lct[i],
+					scheduled =? scheduled,
+					"resource overload detected"
+				);
+				let mut reason = Vec::with_capacity(2 * scheduled.len());
+				for &j in &scheduled {
+					reason.push(self.start_times[j].lit(ctx, IntLitMeaning::GreaterEq(est[j])));
+					reason.push(
+						self.start_times[j]
+							.lit(ctx, IntLitMeaning::Less(lct[i] - self.durations[j] + 1)),
+					);
+				}
+				return Err(ctx.declare_conflict(reason));
+			}
+		}
+
+		// Detectable precedences (Fahimi & Quimper, Algorithm 6). A single
+		// forward sweep over tasks by non-decreasing ect, advancing a pointer
+		// `j` over the lst-sorted tasks; the detected predecessors of `i` are
+		// `{ k ≠ i | lst_k < ect_i }`, a prefix that grows monotonically. The
+		// sweep does two things at once:
+		//
+		//  * emits the difference-logic edge `s_i ≥ s_k + p_k` for every detected
+		//    predecessor (composable, persistent across propagations), and
+		//  * pushes `est_i` up to the earliest completion time of that predecessor
+		//    *set* via the time line (the energy bound), which the pairwise edges
+		//    cannot express.
+		//
+		// A task `k` with a *compulsory part* (`lst_k < ect_k`) must be filtered
+		// before being scheduled, which the add-only time line cannot undo. So
+		// when the sweep first meets it as a predecessor it is held as the
+		// `blocking` task and the bound push of every task detected meanwhile is
+		// deferred to `postponed`, flushed once the for-loop reaches `k` itself.
+		// Edge emission is unaffected by blocking (each pairwise edge is sound on
+		// its own), so only the bound push participates in the postponement.
+		let mut tl = TimeLine::new(&est, &lct, &self.durations);
+		let mut scheduled: Vec<usize> = Vec::with_capacity(n);
+		let mut postponed: Vec<usize> = Vec::new();
+		let mut blocking: Option<usize> = None;
+		let mut j = 0;
+
+		for idx in 0..n {
+			let i = self.by_ect[idx];
+			while j < n && lst[self.by_lst[j]] < ect[i] {
+				let k = self.by_lst[j];
+				if lst[k] >= ect[k] {
+					// No compulsory part: schedule it as a predecessor.
+					tl.schedule_task(k, self.durations[k]);
+					scheduled.push(k);
+				} else if blocking.is_none() {
+					blocking = Some(k);
+				} else {
+					// Two tasks with compulsory parts whose mandatory regions
+					// overlap (`lst_{k} < ect_{blocking}`): the resource is
+					// overloaded. Cite both compulsory parts (est + lst of each);
+					// with the always-present no-overlap they are infeasible.
+					let b = blocking.unwrap();
+					let reason = vec![
+						self.start_times[b].lit(ctx, IntLitMeaning::GreaterEq(est[b])),
+						self.start_times[b].lit(ctx, IntLitMeaning::Less(lst[b] + 1)),
+						self.start_times[k].lit(ctx, IntLitMeaning::GreaterEq(est[k])),
+						self.start_times[k].lit(ctx, IntLitMeaning::Less(lst[k] + 1)),
+					];
+					return Err(ctx.declare_conflict(reason));
+				}
+				j += 1;
+			}
+
+			// Emit `s_i ≥ s_k + p_k` for every detected predecessor `k`.
+			//
+			// TODO(transitive-reduction): emitting every detected pair costs up
+			// to O(n²) gating Booleans. The difference-logic graph could recover
+			// most edges from a transitive reduction (emitting only adjacent
+			// precedences); this is the main cost lever and is left as a
+			// follow-up since the rule is off by default.
+			//
+			// TODO(subsuming-global-edge): when a gateless edge already implies
+			// the precedence we could skip the gated emission (and its fresh
+			// Boolean) via `DiffLogicState::subsuming_global_edge`. That query
+			// exists and is tested, but reaching it from here needs a handle to
+			// the shared graph plus a view→node mapping; deferred. Re-emitting
+			// the same `(x, y, d)` across calls is already free via the
+			// `diff_lit` cache.
+			for &k in &self.by_lst[..j] {
+				if k == i || !self.edge_eligible[i] || !self.edge_eligible[k] {
+					continue;
+				}
+				trace!(
+					target: "disjunctive",
+					predecessor = k,
+					successor = i,
+					edge =? (lst[k], ect[i]),
+					"emit precedence edge"
+				);
+				// Eager reason `{ s_i ≥ est_i, s_k ≤ lst_k }`: with the always
+				// present no-overlap constraint these entail `k ≪ i`, and they
+				// stay true deeper in the subtree (est only rises, lst only
+				// falls) until the edge's trailed propagation is undone.
+				let reason = [
+					self.start_times[i].lit(ctx, IntLitMeaning::GreaterEq(est[i])),
+					self.start_times[k].lit(ctx, IntLitMeaning::Less(lst[k] + 1)),
+				];
+				self.start_times[k].tighten_difference(
+					ctx,
+					self.start_times[i].clone(),
+					-self.durations[k],
+					reason,
+				)?;
+			}
+
+			// Energy bound push (Algorithm 6).
+			if blocking.is_none() {
+				let bound = tl.earliest_completion_time();
+				self.tighten_to_ect(ctx, i, bound, &scheduled, &est, &lst)?;
+			} else if blocking == Some(i) {
+				// Filter the blocking task with the set that *excludes* it (it is
+				// not scheduled yet), then schedule it and flush the postponed
+				// tasks, for all of which the blocking task is a predecessor.
+				let bound = tl.earliest_completion_time();
+				self.tighten_to_ect(ctx, i, bound, &scheduled, &est, &lst)?;
+				tl.schedule_task(i, self.durations[i]);
+				scheduled.push(i);
+				let bound = tl.earliest_completion_time();
+				for &z in &postponed {
+					self.tighten_to_ect(ctx, z, bound, &scheduled, &est, &lst)?;
+				}
+				blocking = None;
+				postponed.clear();
+			} else {
+				postponed.push(i);
+			}
+		}
+		Ok(())
+	}
+}
+
 impl OmegaThetaTree {
 	/// Add a task with number `task_no` to the tree.
 	fn add_task(&mut self, task_no: usize, earliest_start_time: i64, duration: i64) {
@@ -1438,9 +1784,144 @@ mod tests {
 	use tracing_test::traced_test;
 
 	use crate::{
+		IntVal,
 		constraints::disjunctive::DisjunctivePropagator,
-		solver::{LiteralStrategy, Solver},
+		model::Model,
+		solver::{LiteralStrategy, Solver, Status},
 	};
+
+	/// Enumerate every solution of a small three-task disjunctive instance,
+	/// lowered through the model so the difference-logic propagator is
+	/// registered, with the `DiffLogicPrecedence` edge emitter either on or
+	/// off.
+	fn disjunctive_solutions(diff_logic_precedence: bool) -> Vec<Vec<IntVal>> {
+		let mut model = Model::default();
+		let a = model.new_int_decision(0..=4);
+		let b = model.new_int_decision(0..=4);
+		let c = model.new_int_decision(0..=4);
+		model
+			.disjunctive()
+			.start_times(vec![a, b, c])
+			.durations(vec![2, 3, 1])
+			.maybe_diff_logic_precedence_propagation(Some(diff_logic_precedence))
+			.post()
+			.unwrap();
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let vars = vec![
+			map.get(&mut slv, a),
+			map.get(&mut slv, b),
+			map.get(&mut slv, c),
+		];
+		let mut sols: Vec<Vec<IntVal>> = Vec::new();
+		let status = slv
+			.solve()
+			.all_solutions(vars.clone())
+			.collect_solutions_in(vars, &mut sols)
+			.satisfy();
+		assert_eq!(status, Status::Complete);
+		sols.sort();
+		sols
+	}
+
+	/// Emitting difference-logic edges for detected precedences must only
+	/// *prune*, never change the solution set: enumerating with the
+	/// `DiffLogicPrecedence` propagator on and off yields the identical set
+	/// (and exercises the full emit → diff-logic propagate path end-to-end).
+	#[test]
+	fn diff_logic_precedence_edges_preserve_solution_set() {
+		let with_dlp = disjunctive_solutions(true);
+		let without_dlp = disjunctive_solutions(false);
+		assert_eq!(with_dlp, without_dlp);
+		// The same instance is enumerated by `test_disjunctive_strict_propagator`
+		// (10 solutions); guard against an empty/degenerate enumeration.
+		assert_eq!(with_dlp.len(), 10);
+	}
+
+	/// Enumerate every solution of a disjunctive instance that contains a task
+	/// with a *compulsory part* at the root (`b ∈ [2, 3]`, duration 3 ⇒ the
+	/// interval `[3, 5)` is always occupied) which is a detected predecessor of
+	/// `a` (`ect_a = 6 > lst_b = 3`), so the `DiffLogicPrecedence` sweep
+	/// exercises the blocking-task bound-push path of Algorithm 6 already at
+	/// the root, with the propagator either on or off. Total work (7) fits the
+	/// window, so the instance is satisfiable.
+	fn disjunctive_solutions_with_compulsory_part(diff_logic_precedence: bool) -> Vec<Vec<IntVal>> {
+		let mut model = Model::default();
+		let a = model.new_int_decision(4..=12);
+		let b = model.new_int_decision(2..=3);
+		let c = model.new_int_decision(0..=12);
+		let d = model.new_int_decision(0..=12);
+		model
+			.disjunctive()
+			.start_times(vec![a, b, c, d])
+			.durations(vec![2, 3, 1, 1])
+			.maybe_diff_logic_precedence_propagation(Some(diff_logic_precedence))
+			.post()
+			.unwrap();
+
+		let (mut slv, map): (Solver, _) = model.lower().to_solver().unwrap();
+		let vars = vec![
+			map.get(&mut slv, a),
+			map.get(&mut slv, b),
+			map.get(&mut slv, c),
+			map.get(&mut slv, d),
+		];
+		let mut sols: Vec<Vec<IntVal>> = Vec::new();
+		let status = slv
+			.solve()
+			.all_solutions(vars.clone())
+			.collect_solutions_in(vars, &mut sols)
+			.satisfy();
+		assert_eq!(status, Status::Complete);
+		sols.sort();
+		sols
+	}
+
+	/// The Algorithm 6 energy bound push (and its blocking-task handling) must
+	/// only *prune*, never change the solution set. Enumerating an instance
+	/// with a compulsory part — which drives the blocking/postponed branch —
+	/// yields the identical set with the `DiffLogicPrecedence` propagator on
+	/// and off.
+	#[test]
+	fn diff_logic_precedence_bound_push_preserves_solution_set() {
+		let with_dlp = disjunctive_solutions_with_compulsory_part(true);
+		let without_dlp = disjunctive_solutions_with_compulsory_part(false);
+		assert_eq!(with_dlp, without_dlp);
+		assert!(!with_dlp.is_empty(), "degenerate empty enumeration");
+	}
+
+	/// Three unit-duration tasks that must all run within `[0, 2)` cannot fit
+	/// on a single resource. With the `DiffLogicPrecedence` propagator enabled
+	/// the instance must be reported infeasible — whether the overload is
+	/// caught at lowering (the model-stage overload check) or only during
+	/// search.
+	#[test]
+	fn diff_logic_precedence_overload_is_unsatisfiable() {
+		let mut model = Model::default();
+		let a = model.new_int_decision(0..=1);
+		let b = model.new_int_decision(0..=1);
+		let c = model.new_int_decision(0..=1);
+		let posted = model
+			.disjunctive()
+			.start_times(vec![a, b, c])
+			.durations(vec![1, 1, 1])
+			.maybe_diff_logic_precedence_propagation(Some(true))
+			.post();
+		if posted.is_err() {
+			// Infeasibility proven already while posting (model-stage check).
+			return;
+		}
+
+		let lowered: Result<(Solver, _), _> = model.lower().to_solver();
+		match lowered {
+			// Infeasibility proven at lowering time.
+			Err(_) => {}
+			// Otherwise it must be proven during search.
+			Ok((mut slv, _map)) => {
+				assert_eq!(slv.solve().satisfy(), Status::Unsatisfiable);
+			}
+		}
+	}
 
 	#[test]
 	#[traced_test]

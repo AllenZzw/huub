@@ -131,6 +131,7 @@ impl Model {
 		edge_finding_propagation: Option<bool>,
 		not_last_propagation: Option<bool>,
 		detectable_precedence_propagation: Option<bool>,
+		diff_logic_precedence_propagation: Option<bool>,
 	) -> Result<(), Conflict<View<bool>>> {
 		assert_eq!(
 			start_times.len(),
@@ -141,12 +142,21 @@ impl Model {
 			durations.iter().all(|&dur| dur >= 0),
 			"disjunctive cannot be given any negative durations."
 		);
+		// When the difference-logic precedence rule is enabled the `Disjunctive`
+		// constraint posts a `DiffLogicPrecedence` propagator that emits
+		// difference-logic edges during search; flag the model so lowering
+		// registers the global difference-logic propagator even if no two-term
+		// linears were routed into the edge collection.
+		if diff_logic_precedence_propagation == Some(true) {
+			self.has_diff_logic_emitter = true;
+		}
 		let propagator = DisjunctivePropagator::new(self, start_times, durations, true, true, true);
 		self.post_constraint(Disjunctive {
 			propagator,
 			edge_finding_propagation,
 			not_last_propagation,
 			detectable_precedence_propagation,
+			diff_logic_precedence_propagation,
 		})
 	}
 
